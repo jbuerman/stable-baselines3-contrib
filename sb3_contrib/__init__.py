@@ -7,6 +7,7 @@ from sb3_contrib.ppo_recurrent import RecurrentPPO
 from sb3_contrib.qrdqn import QRDQN
 from sb3_contrib.tqc import TQC
 from sb3_contrib.trpo import TRPO
+from sb3_contrib.rainbow.rainbow import Rainbow
 
 # Read version from file
 version_file = os.path.join(os.path.dirname(__file__), "version.txt")
@@ -20,5 +21,6 @@ __all__ = [
     "TRPO",
     "CrossQ",
     "MaskablePPO",
+    "Rainbow",
     "RecurrentPPO",
 ]
