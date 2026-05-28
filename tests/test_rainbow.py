@@ -45,6 +45,21 @@ def test_sb3_wrapper_runs():
         action, _ = model.predict(obs)
         obs, _, _, _, _ = env.step(int(action))
 
+        obs = env.observation_space.sample()
+        next_obs = env.observation_space.sample()
+
+        model._raw_per.append(
+            obs,
+            0,
+            0.0,
+            next_obs,
+            False,
+            False,
+            stream=0,
+        )
+        model.env_steps += 1
+        model.min_sampling_size = 1
+
         model.train(gradient_steps=1, batch_size=8)
 
     assert True
