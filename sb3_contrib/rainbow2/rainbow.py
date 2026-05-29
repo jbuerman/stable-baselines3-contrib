@@ -10,9 +10,6 @@ import torch.optim as optim
 import numpy as np
 from copy import deepcopy
 from functools import partial
-
-from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.type_aliases import ReplayBufferSamples
 from torch import nn as nn, Tensor
 from torch.nn import init
 from math import sqrt
@@ -510,14 +507,8 @@ class PER:
         dones = torch.tensor(dones, dtype=torch.bool, device=self.device)
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
 
-        # Convert to SB3 standard tensors
-        return ReplayBufferSamples(
-            observations=states,
-            actions=actions.unsqueeze(-1),
-            next_observations=n_states,
-            dones=dones.float().unsqueeze(-1),
-            rewards=rewards.unsqueeze(-1),
-        ), idxs, weights
+        # return batch
+        return tree_idxs, states, actions, rewards, n_states, dones, weights
 
     def compute_discounted_rewards_batch(self, rewards_batch, dones_batch, truns_batch):
         """
@@ -572,66 +563,6 @@ def create_network(input_dims, n_actions, device, linear_size):
 
 
 #################### The big ol agent class, be prepared
-
-class Rainbow(OffPolicyAlgorithm):
-    """
-    Transitional Rainbow implementation.
-    Wraps existing Agent logic but exposes SB3 structure.
-    """
-
-    def __init__(
-        self,
-        policy,
-        env,
-        learning_rate=6.25e-5,
-        buffer_size=1_000_000,
-        batch_size=32,
-        gamma=0.99,
-        train_freq=4,
-        gradient_steps=1,
-        target_update_interval=8000,
-        verbose=0,
-        device="auto",
-        _init_setup_model=True,
-        **kwargs,
-    ):
-        super().__init__(
-            policy=policy,
-            env=env,
-            learning_rate=learning_rate,
-            buffer_size=buffer_size,
-            batch_size=batch_size,
-            tau=1.0,
-            gamma=gamma,
-            train_freq=train_freq,
-            gradient_steps=gradient_steps,
-            action_noise=None,
-            replay_buffer_class=None,
-            replay_buffer_kwargs=None,
-            policy_kwargs=None,
-            verbose=verbose,
-            device=device,
-            support_multi_env=True,
-        )
-
-        if _init_setup_model:
-            self._setup_model()
-
-    def _setup_model(self) -> None:
-        super()._setup_model()
-
-        obs_shape = self.observation_space.shape
-        n_actions = self.action_space.n
-
-        self._agent = Agent(
-            n_actions=n_actions,
-            input_dims=list(obs_shape),
-            device=self.device,
-            num_envs=1,
-            agent_name="sb3_rainbow",
-            total_steps=100000,
-            batch_size=self.batch_size,
-        )
 
 class Agent:
     def __init__(self, n_actions, input_dims, device, num_envs, agent_name, total_steps, testing=False, batch_size=32,
@@ -787,16 +718,6 @@ class Agent:
 
         idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
 
-        return ReplayBufferSamples(
-            observations=states,
-            actions=actions.unsqueeze(-1),
-            next_observations=n_states,
-            dones=dones.float().unsqueeze(-1),
-            rewards=rewards.unsqueeze(-1),
-        ), idxs, weights
-
-        return tree_idxs, states, actions, rewards, n_states, dones, weights
-
         # use this code to check your states are correct if applying to a custom env
         # If you apply Rainbow to a custom env and don't check your states first, you are killing both
         # trees and your own time
@@ -894,8 +815,18 @@ def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
     return proj_distr
 
 def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True):
-    return gym.vector.SyncVectorEnv([lambda: gym.wrappers.FrameStackObservation(
-        gym.wrappers.AtariPreprocessing(gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs), terminal_on_life_loss=terminal_on_life_loss), framestack) for _ in range(envs_create)])
+    return gym.vector.SyncVectorEnv(
+        [
+            lambda: gym.wrappers.FrameStackObservation(
+                gym.wrappers.AtariPreprocessing(
+                    gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
+                    terminal_on_life_loss=terminal_on_life_loss
+                ),
+                framestack
+            )
+            for _ in range(envs_create)
+        ]
+    )
 
 
 def non_default_args(args, parser):
