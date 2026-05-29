@@ -1,187 +1,22 @@
-import time
-import gymnasium as gym
 import argparse
 import multiprocessing as mp
 import os
+import time
+from copy import deepcopy
+from functools import partial
+
+import ale_py
+import gymnasium as gym
+import numpy as np
 import torch
 import torch as T
 import torch.nn.functional as F
 import torch.optim as optim
-import numpy as np
-from copy import deepcopy
-from functools import partial
-from torch import nn as nn, Tensor
-from torch.nn import init
-from math import sqrt
-import math
-import ale_py
+from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
+from stable_baselines3.common.type_aliases import TrainFreq, TrainFrequencyUnit
 
-############################################## Networks Section
+from sb3_contrib.rainbow2.rainbow_policy import FactorizedNoisyLinear, NatureC51
 
-class FactorizedNoisyLinear(nn.Module):
-    """ The factorized Gaussian noise layer for noisy-nets dqn. """
-    def __init__(self, in_features: int, out_features: int, sigma_0=0.5, self_norm=False) -> None:
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.sigma_0 = sigma_0
-
-        # weight: w = \mu^w + \sigma^w . \epsilon^w
-        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
-        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
-        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
-
-        # bias: b = \mu^b + \sigma^b . \epsilon^b
-        self.bias_mu = nn.Parameter(torch.empty(out_features))
-        self.bias_sigma = nn.Parameter(torch.empty(out_features))
-        self.register_buffer('bias_epsilon', torch.empty(out_features))
-
-        if self_norm:
-            self.reset_parameters_self_norm()
-        else:
-            self.reset_parameters()
-        self.reset_noise()
-
-        self.disable_noise()
-
-    @torch.no_grad()
-    def reset_parameters(self) -> None:
-        # initialization is similar to Kaiming uniform (He. initialization) with fan_mode=fan_in
-        scale = 1 / sqrt(self.in_features)
-
-        init.uniform_(self.weight_mu, -scale, scale)
-        init.uniform_(self.bias_mu, -scale, scale)
-
-        init.constant_(self.weight_sigma, self.sigma_0 * scale)
-        init.constant_(self.bias_sigma, self.sigma_0 * scale)
-
-    @torch.no_grad()
-    def reset_parameters_self_norm(self) -> None:
-        # initialization is similar to Kaiming uniform (He. initialization) with fan_mode=fan_in
-
-        nn.init.normal_(self.weight_mu, std=1 / math.sqrt(self.out_features))
-        if self.bias_mu is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_mu)
-            bound = 1 / math.sqrt(fan_in)
-            nn.init.uniform_(self.bias_mu, -bound, bound)
-
-    @torch.no_grad()
-    def _get_noise(self, size: int) -> Tensor:
-        noise = torch.randn(size, device=self.weight_mu.device)
-        # f(x) = sgn(x)sqrt(|x|)
-        return noise.sign().mul_(noise.abs().sqrt_())
-
-    @torch.no_grad()
-    def reset_noise(self) -> None:
-        # like in eq 10 and 11 of the paper
-        epsilon_in = self._get_noise(self.in_features)
-        epsilon_out = self._get_noise(self.out_features)
-        self.weight_epsilon.copy_(epsilon_out.outer(epsilon_in))
-        self.bias_epsilon.copy_(epsilon_out)
-
-    @torch.no_grad()
-    def disable_noise(self) -> None:
-        self.weight_epsilon[:] = 0
-        self.bias_epsilon[:] = 0
-
-    def forward(self, input: Tensor) -> Tensor:
-        # y = wx + d, where
-        # w = \mu^w + \sigma^w * \epsilon^w
-        # b = \mu^b + \sigma^b * \epsilon^b
-        return F.linear(input,
-                        self.weight_mu + self.weight_sigma*self.weight_epsilon,
-                        self.bias_mu + self.bias_sigma*self.bias_epsilon)
-
-
-class NatureC51(nn.Module):
-    """
-    Implementation of the Nature CNN, with the Categorical heads used for C51.
-    """
-    def __init__(self, in_depth, actions, atoms=51, Vmin=-10, Vmax=10, device='cuda:0', linear_size=512):
-        super().__init__()
-
-        self.actions = actions
-        self.atoms = atoms
-        self.device = device
-        self.linear_size = linear_size
-
-        DELTA_Z = (Vmax - Vmin) / (atoms - 1)
-
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels=in_depth, out_channels=32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1),
-            nn.ReLU(),
-        )
-
-        conv_out_size = 3136
-
-        # Noisy Linear Layers, with both value and advantage functions for dueling DQN
-        self.fc1V = FactorizedNoisyLinear(conv_out_size, linear_size)
-        self.fc1A = FactorizedNoisyLinear(conv_out_size, linear_size)
-        self.fcV2 = FactorizedNoisyLinear(linear_size, self.atoms)
-        self.fcA2 = FactorizedNoisyLinear(linear_size, actions * self.atoms)
-
-        self.register_buffer("supports", torch.arange(Vmin, Vmax+DELTA_Z, DELTA_Z))
-        self.softmax = nn.Softmax(dim=1)
-
-        self.to(device)
-
-    def reset_noise(self):
-        for name, module in self.named_children():
-            if 'fc' in name:
-                module.reset_noise()
-
-    def _get_conv_out(self, shape):
-        o = self.conv(torch.zeros(1, *shape))
-        return int(np.prod(o.size()))
-
-    def fc_val(self, x):
-        x = F.relu(self.fc1V(x))
-        x = self.fcV2(x)
-
-        return x
-
-    def fc_adv(self, x):
-        x = F.relu(self.fc1A(x))
-        x = self.fcA2(x)
-
-        return x
-
-    def forward(self, x):
-        batch_size = x.size()[0]
-        fx = x.float() / 255
-        conv_out = self.conv(fx)
-
-        conv_out = conv_out.view(batch_size, -1)
-
-        val_out = self.fc_val(conv_out).view(batch_size, 1, self.atoms)
-        adv_out = self.fc_adv(conv_out).view(batch_size, -1, self.atoms)
-        adv_mean = adv_out.mean(dim=1, keepdim=True)
-        return val_out + (adv_out - adv_mean)
-
-    def both(self, x):
-        cat_out = self(x)
-        probs = self.apply_softmax(cat_out)
-        weights = probs * self.supports
-        res = weights.sum(dim=2)
-        return cat_out, res
-
-    def qvals(self, x, advantages_only=False):
-        return self.both(x)[1]
-
-    def apply_softmax(self, t):
-        return self.softmax(t.view(-1, self.atoms)).view(t.size())
-
-    def save_checkpoint(self, name):
-        #print('... saving checkpoint ...')
-        torch.save(self.state_dict(), name + ".model")
-
-    def load_checkpoint(self, name):
-        #print('... loading checkpoint ...')
-        self.load_state_dict(torch.load(name))
 
 ################# Now Entering the Prioritized Experience Replay Section
 
@@ -564,6 +399,173 @@ def create_network(input_dims, n_actions, device, linear_size):
 
 #################### The big ol agent class, be prepared
 
+
+class Rainbow(OffPolicyAlgorithm):
+    def __init__(
+        self,
+        policy,
+        env,
+        learning_rate=6.25e-5,
+        buffer_size=1_000_000,
+        learning_starts=20000,
+        batch_size=32,
+        gamma=0.99,
+        train_freq=(1, "step"),
+        gradient_steps=1,
+        init_setup_model=True,
+        **kwargs,
+    ):
+        super().__init__(
+            policy=policy,
+            env=env,
+            learning_rate=learning_rate,
+            buffer_size=buffer_size,
+            learning_starts=learning_starts,
+            batch_size=batch_size,
+            gamma=gamma,
+            train_freq=train_freq,
+            gradient_steps=gradient_steps,
+            **kwargs,
+        )
+
+        if isinstance(self.train_freq, tuple):
+            self.train_freq = TrainFreq(train_freq[0], TrainFrequencyUnit(train_freq[1]))
+
+        self.grad_steps = 0
+        self.replace_target_cnt = 2000  # or your original logic
+        self.Vmin = -10
+        self.Vmax = 10
+        self.N_ATOMS = 51
+        self.n = 3
+        self.grad_clip = 10
+
+        if init_setup_model:
+            self._setup_model()
+
+    def _setup_model(self):
+        super()._setup_model()
+
+        assert self.policy is not None, "Policy was not created!"
+
+        self.q_net = self.policy.q_net
+        self.q_net_target = self.policy.q_net_target
+
+        self.memory = self.replay_buffer  # TODO remove
+
+    def train(self, gradient_steps, batch_size):        
+        for _ in range(gradient_steps):
+            self._train_call()
+
+    @torch.no_grad()
+    def reset_noise(self, net):
+        for m in net.modules():
+            if isinstance(m, FactorizedNoisyLinear):
+                m.reset_noise()
+
+    def replace_target_network(self):
+        self.q_net_target.load_state_dict(self.q_net.state_dict())
+
+    def sample_from_memory(self):
+        # TODO temporary remove
+        data = self.memory.sample(self.batch_size)
+
+        device = self.q_net.device
+
+        return (
+            None,
+            data.observations.to(device),
+            data.actions.squeeze().to(device),
+            data.rewards.squeeze().to(device),
+            data.next_observations.to(device),
+            data.dones.squeeze().to(device),
+            torch.ones_like(data.rewards, device=device),
+        )
+
+    def _train_call(self):
+        if self.num_timesteps < self.learning_starts:
+            return
+
+        # NoisyNet: resample noise on both networks per gradient step
+        self.reset_noise(self.q_net)
+        self.reset_noise(self.q_net_target)
+
+        if self.grad_steps % self.replace_target_cnt == 0:
+            self.replace_target_network()
+
+        idxs, states, actions, rewards, next_states, dones, weights = self.sample_from_memory()
+        device = self.q_net.device
+
+        states = states.to(device)
+        # states = states.to(device, non_blocking=True)
+        actions = actions.to(device)
+        rewards = rewards.to(device)
+        next_states = next_states.to(device)
+        dones = dones.to(device)
+        weights = weights.to(device)
+
+        # use this code to check your states are correct if applying to a custom env
+        # If you apply Rainbow to a custom env and don't check your states first, you are killing both
+        # trees and your own time
+
+        # plt.imshow(states[0][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        #
+        # plt.imshow(states[0][1].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        #
+        # plt.imshow(states[0][2].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        #
+        # plt.imshow(states[1][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        #
+        # plt.imshow(states[2][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+
+        self.policy.optimizer.zero_grad()
+        distr_v, qvals_v = self.q_net.both(states)
+        state_action_values = distr_v[torch.arange(actions.shape[0]), actions]
+        state_log_sm_v = F.log_softmax(state_action_values, dim=1)
+
+        with torch.no_grad():
+            # this is using Double DQN
+            next_distr_v, next_qvals_v = self.q_net_target.both(next_states)
+            action_distr_v, action_qvals_v = self.q_net.both(next_states)
+
+            next_actions_v = action_qvals_v.max(1)[1]
+
+            next_best_distr_v = next_distr_v[range(self.batch_size), next_actions_v.data]
+            next_best_distr_v = self.q_net_target.apply_softmax(next_best_distr_v)
+            next_best_distr = next_best_distr_v.detach()
+
+            proj_distr = distr_projection(
+                next_best_distr, rewards, dones, self.Vmin, self.Vmax, self.N_ATOMS, self.gamma**self.n
+            )
+
+            proj_distr_v = proj_distr.to(self.q_net.device)
+
+        state_log_sm_v = state_log_sm_v.to(self.q_net.device)
+        kl_per_sample = (-state_log_sm_v * proj_distr_v).sum(dim=1)
+
+        # update PER priorities with the raw (unweighted) KL
+        if hasattr(self.memory, "update_priorities") and idxs is not None:
+            self.memory.update_priorities(idxs, kl_per_sample.detach().cpu().numpy())
+
+        weights = weights.squeeze().to(self.q_net.device)
+        loss = (weights * kl_per_sample).mean()
+
+        loss.backward()
+
+        # this wasn't explicitly mentioned in the Rainbow DQN paper, but was used in DQN and was likely kept
+        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
+        self.policy.optimizer.step()
+
+        self.grad_steps += 1
+        if self.grad_steps % 10000 == 0:
+            print("Completed " + str(self.grad_steps) + " gradient steps")
+
+
+
 class Agent:
     def __init__(self, n_actions, input_dims, device, num_envs, agent_name, total_steps, testing=False, batch_size=32,
                  rr=1, lr=6.25e-5, target_replace=2000, discount=0.99, linear_size=512,
@@ -783,19 +785,21 @@ def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
     "A Distributional Perspective on RL" paper
     """
     batch_size = len(rewards)
-    proj_distr = T.zeros((batch_size, n_atoms), dtype=T.float32)
+    device = next_distr.device
+    proj_distr = T.zeros((batch_size, n_atoms), dtype=T.float32, device=device)
     delta_z = (Vmax - Vmin) / (n_atoms - 1)
     for atom in range(n_atoms):
-        tz_j = T.clamp(rewards + (Vmin + atom * delta_z) * gamma, Vmin, Vmax)
-        b_j = (tz_j - Vmin) / delta_z
-        l = T.floor(b_j).type(T.int64)
-        u = T.ceil(b_j).type(T.int64)
+        tz_j = T.clamp(rewards + (Vmin + atom * delta_z) * gamma, Vmin, Vmax).to(device)
+        b_j = ((tz_j - Vmin) / delta_z).to(device)
+        l = T.floor(b_j).long()
+        u = T.ceil(b_j).long()
         eq_mask = u == l
         proj_distr[eq_mask, l[eq_mask]] += next_distr[eq_mask, atom]
         ne_mask = u != l
         proj_distr[ne_mask, l[ne_mask]] += next_distr[ne_mask, atom] * (u - b_j)[ne_mask]
         proj_distr[ne_mask, u[ne_mask]] += next_distr[ne_mask, atom] * (b_j - l)[ne_mask]
     if dones.any():
+        dones = dones.bool()
         proj_distr[dones] = 0.0
         tz_j = T.clamp(rewards[dones], Vmin, Vmax)
         b_j = (tz_j - Vmin) / delta_z

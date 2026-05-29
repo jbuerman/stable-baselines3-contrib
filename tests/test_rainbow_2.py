@@ -1,9 +1,12 @@
 import torch
 import numpy as np
 
-from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER
+from gymnasium import spaces
 
-def smoke_test():
+from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER
+from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
+
+def test_smoke():
     device = torch.device("cpu")
 
     # minimal env
@@ -74,3 +77,14 @@ def test_agent_action():
     action = agent.choose_action(obs)
 
     assert action.shape == (1,)
+
+def test_policy():
+    obs_space = spaces.Box(low=0, high=255, shape=(4, 84, 84), dtype=np.uint8)
+    action_space = spaces.Discrete(6)
+
+    policy = RainbowPolicy(obs_space, action_space, lr_schedule=lambda x: 1e-4)
+
+    obs = torch.randn(2, 4, 84, 84)
+    action = policy._predict(obs)
+
+    assert action.shape == (2,)
