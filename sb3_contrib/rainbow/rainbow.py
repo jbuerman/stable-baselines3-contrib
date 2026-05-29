@@ -164,9 +164,9 @@ class Rainbow(OffPolicyAlgorithm):
         """SB3 training step
         """
         for _ in range(gradient_steps):
-            self.train_call()
+            self._train_call()
 
-    def train_call(self):
+    def _train_call(self):
 
         if self.env_steps < self.min_sampling_size:
             return
@@ -206,25 +206,25 @@ class Rainbow(OffPolicyAlgorithm):
         # plt.show()
 
         self.optimizer.zero_grad()
-        distr_v, qvals_v = self.net.both(states)
+        distr_v, qvals_v = self.q_net.both(states)
         state_action_values = distr_v[range(self.batch_size), actions.data]
         state_log_sm_v = F.log_softmax(state_action_values, dim=1)
 
         with torch.no_grad():
             # this is using Double DQN
-            next_distr_v, next_qvals_v = self.tgt_net.both(next_states)
-            action_distr_v, action_qvals_v = self.net.both(next_states)
+            next_distr_v, next_qvals_v = self.target_q_net.both(next_states)
+            action_distr_v, action_qvals_v = self.q_net.both(next_states)
 
             next_actions_v = action_qvals_v.max(1)[1]
 
             next_best_distr_v = next_distr_v[range(self.batch_size), next_actions_v.data]
-            next_best_distr_v = self.tgt_net.apply_softmax(next_best_distr_v)
+            next_best_distr_v = self.target_q_net.apply_softmax(next_best_distr_v)
             next_best_distr = next_best_distr_v.data.cpu()
 
             proj_distr = distr_projection(next_best_distr, rewards.cpu(), dones.cpu(), self.Vmin, self.Vmax,
                                           self.N_ATOMS, self.gamma ** self.n)
 
-            proj_distr_v = proj_distr.to(self.net.device)
+            proj_distr_v = proj_distr.to(self.q_net.device)
 
         # per-sample KL (cross-entropy form); used as priority before IS-weighting
         kl_per_sample = (-state_log_sm_v * proj_distr_v).sum(dim=1)
@@ -232,33 +232,33 @@ class Rainbow(OffPolicyAlgorithm):
         # update PER priorities with the raw (unweighted) KL
         self.replay_buffer.update_priorities(idxs, kl_per_sample.detach().cpu().numpy())
 
-        weights = T.squeeze(weights).to(self.net.device)
+        weights = T.squeeze(weights).to(self.q_net.device)
         loss = (weights * kl_per_sample).mean()
 
         loss.backward()
 
         # this wasn't explicitly mentioned in the Rainbow DQN paper, but was used in DQN and was likely kept
-        torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
+        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
         self.optimizer.step()
 
         self.grad_steps += 1
         if self.grad_steps % 10000 == 0:
             print("Completed " + str(self.grad_steps) + " gradient steps")
 
-    def predict(self, observation, deterministic=False):
+    def predict(self, observation, state=None, episode_start=None, deterministic=False):
         """
         Used by SB3 for inference
         """
-
         with torch.no_grad():
             qvals = self.policy.get_q_values(observation)
             action = torch.argmax(qvals, dim=1).cpu().numpy()
             # If single environment → return scalar
+            self.env_steps += 1
             if action.shape[0] == 1:
                 return action[0], None
-            self.env_steps += 1
 
-        return action,
+
+        return action, None
 
     @torch.no_grad()
     def reset_noise(self):
