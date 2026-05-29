@@ -6,7 +6,7 @@ from gymnasium import spaces
 from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
 
-def test_smoke():
+def test_smoke_test():
     device = torch.device("cpu")
 
     # minimal env
