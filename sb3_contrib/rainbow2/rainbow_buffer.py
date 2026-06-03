@@ -1,5 +1,9 @@
+from typing import NamedTuple
+
 import numpy as np
 import torch
+from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.type_aliases import ReplayBufferSamples
 
 
 class SumTree:
@@ -79,8 +83,33 @@ class SumTree:
     def total(self):
         return self.sum_tree[0]
 
-class PER:
+
+# Extend ReplayBufferSamples for PER
+# Copy ReplayBufferSamples fields
+replay_buffer_samples_fields = list(ReplayBufferSamples.__annotations__.items())
+# Add Additional fields
+replay_buffer_samples_fields.append(("idxs", np.ndarray | None))
+replay_buffer_samples_fields.append(("weights", torch.Tensor | None))
+# Construct new NamedTuple with all fields.
+PERReplayBufferSamples = NamedTuple(
+    "PERReplayBufferSamples",
+    replay_buffer_samples_fields
+)
+# Preserve original defaults and add new ones
+base_defaults = ReplayBufferSamples.__new__.__defaults__ or ()
+PERReplayBufferSamples.__new__.__defaults__ = (
+    *base_defaults,
+    None,
+    None
+)
+
+
+class PER(ReplayBuffer):
     def __init__(self, size, device, n, envs, gamma, alpha=0.5, beta=0.4, framestack=4, imagex=84, imagey=84, rgb=False):
+        self.buffer_size = size
+        self.n_envs = envs
+        self.pos = 0
+        self.full = False
 
         self.st = SumTree(size)
         self.data = [None for _ in range(size)]
@@ -113,6 +142,7 @@ class PER:
 
         self.alpha = alpha
         self.beta = beta
+        self.beta_increment = 0.0
         self.eps = 1e-6  # small constant to stop 0 probability
         self.device = device
 
@@ -144,6 +174,26 @@ class PER:
         self.pointer_mem = np.array([self.blank_trans] * size, dtype=self.trans_dtype)
 
         self.overlap = self.framestack - self.n_step
+
+    def add(self, obs, next_obs, action, reward, done, infos):
+        batch_size = len(action)
+
+        for i in range(batch_size):
+            state = obs[i]
+            next_state = next_obs[i]
+            act = action[i]
+            rew = reward[i]
+            dn = done[i]
+
+            # SB3 does not explicitly pass truncation here
+            trun = False
+
+            # You are currently using a single stream
+            stream = 0
+
+            self.append(state, act, rew, next_state, dn, trun, stream, prio=True)
+
+        self.beta = min(self.beta + self.beta_increment, 1.0)
 
     def append(self, state, action, reward, n_state, done, trun, stream, prio=True):
 
@@ -261,7 +311,7 @@ class PER:
             self.reward_buffer[stream].append(self.reward_mem_idx)
             self.reward_mem_idx = (self.reward_mem_idx + 1) % self.storage_size
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, env=None):
 
         # get total sumtree priority
         p_total = self.st.total()
@@ -327,7 +377,19 @@ class PER:
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
 
         # return batch
-        return tree_idxs, states, actions, rewards, n_states, dones, weights
+        batch = PERReplayBufferSamples(
+            observations=states,
+            actions=actions,
+            next_observations=n_states,
+            dones=dones,
+            rewards=rewards,
+            idxs=tree_idxs,
+            weights=weights,
+        )
+
+        # batch.idxs = tree_idxs
+        # batch.weights = weights
+        return batch
 
     def compute_discounted_rewards_batch(self, rewards_batch, dones_batch, truns_batch):
         """

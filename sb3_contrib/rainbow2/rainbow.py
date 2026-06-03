@@ -89,7 +89,7 @@ class Rainbow(OffPolicyAlgorithm):
         self.q_net = self.policy.q_net
         self.q_net_target = self.policy.q_net_target
 
-        self.memory = PER(
+        self.per_buffer = PER(
             size=100_000,  # TODO small for now
             device=self.device,
             rgb=self.rgb,
@@ -98,10 +98,13 @@ class Rainbow(OffPolicyAlgorithm):
             gamma=self.gamma,
         )
 
+        self.replay_buffer = self.per_buffer
+
     def _setup_learn(self, total_timesteps, *args, **kwargs):
         self.priority_weight_increase = (
             1 - self.per_beta
         ) / total_timesteps
+        self.per_buffer.beta_increment = self.priority_weight_increase
         return super()._setup_learn(total_timesteps, *args, **kwargs)
 
     def train(self, gradient_steps, batch_size):        
@@ -117,8 +120,14 @@ class Rainbow(OffPolicyAlgorithm):
     def replace_target_network(self):
         self.q_net_target.load_state_dict(self.q_net.state_dict())
 
-    def sample_from_memory(self):
-        return self.memory.sample(self.batch_size)
+    def _sample_buffer(self):
+        return self.replay_buffer.sample(self.batch_size)
+
+    # def _store_to_replay_buffer(self, state, action, reward, next_state, done, trun, stream, prio=True):
+    #     self.per_buffer.append(state, action, reward, next_state, done, trun, stream, prio=prio)
+    #
+    #     # keep PER annealing
+    #     self.per_buffer.beta = min(self.per_beta + self.priority_weight_increase, 1.0)
 
     def _train_call(self):
         if self.num_timesteps < self.learning_starts:
@@ -131,14 +140,20 @@ class Rainbow(OffPolicyAlgorithm):
         if self.grad_steps % self.replace_target_cnt == 0:
             self.replace_target_network()
 
-        idxs, states, actions, rewards, next_states, dones, weights = self.sample_from_memory()
+        batch = self._sample_buffer()
+        obs = batch.observations
+        actions = batch.actions
+        rewards = batch.rewards
+        next_obs = batch.next_observations
+        dones = batch.dones
+        weights = batch.weights
+        idxs = batch.idxs
         device = self.q_net.device
 
-        states = states.to(device)
-        # states = states.to(device, non_blocking=True)
+        obs = obs.to(device)
         actions = actions.to(device)
         rewards = rewards.to(device)
-        next_states = next_states.to(device)
+        next_obs = next_obs.to(device)
         dones = dones.to(device)
         weights = weights.to(device)
 
@@ -162,14 +177,14 @@ class Rainbow(OffPolicyAlgorithm):
         # plt.show()
 
         self.policy.optimizer.zero_grad()
-        distr_v, qvals_v = self.q_net.both(states)
+        distr_v, qvals_v = self.q_net.both(obs)
         state_action_values = distr_v[torch.arange(actions.shape[0]), actions]
         state_log_sm_v = F.log_softmax(state_action_values, dim=1)
 
         with torch.no_grad():
             # this is using Double DQN
-            next_distr_v, next_qvals_v = self.q_net_target.both(next_states)
-            action_distr_v, action_qvals_v = self.q_net.both(next_states)
+            next_distr_v, next_qvals_v = self.q_net_target.both(next_obs)
+            action_distr_v, action_qvals_v = self.q_net.both(next_obs)
 
             next_actions_v = action_qvals_v.max(1)[1]
 
@@ -187,8 +202,8 @@ class Rainbow(OffPolicyAlgorithm):
         kl_per_sample = (-state_log_sm_v * proj_distr_v).sum(dim=1)
 
         # update PER priorities with the raw (unweighted) KL
-        if hasattr(self.memory, "update_priorities") and idxs is not None:
-            self.memory.update_priorities(idxs, kl_per_sample.detach().cpu().numpy())
+        if hasattr(self.replay_buffer, "update_priorities") and idxs is not None:
+            self.replay_buffer.update_priorities(idxs, kl_per_sample.detach().cpu().numpy())
 
         weights = weights.squeeze().to(self.q_net.device)
         loss = (weights * kl_per_sample).mean()
@@ -203,49 +218,45 @@ class Rainbow(OffPolicyAlgorithm):
         if self.grad_steps % 10000 == 0:
             print("Completed " + str(self.grad_steps) + " gradient steps")
 
-    def store_transition(self, state, action, reward, next_state, done, trun, stream, prio=True):
+    # def store_transition(self, state, action, reward, next_state, done, trun, stream, prio=True):
+    #     if self.rgb:
+    #         state = np.expand_dims(state, axis=0)
+    #         next_state = np.expand_dims(next_state, axis=0)
+    #
+    #     self._store_to_replay_buffer(state, action, reward, next_state, done, trun, stream, prio=prio)
 
-        if self.rgb:
-            state = np.expand_dims(state, axis=0)
-            next_state = np.expand_dims(next_state, axis=0)
-
-        self.memory.append(state, action, reward, next_state, done, trun, stream, prio=prio)
-
-        # keep PER annealing
-        self.memory.beta = min(self.per_beta + self.priority_weight_increase, 1.0)
-
-    def _store_transition(
-        self,
-        replay_buffer,
-        buffer_actions,
-        new_obs,
-        reward,
-        dones,
-        infos,
-    ):
-        # keep SB3 happy
-        super()._store_transition(
-            replay_buffer,
-            buffer_actions,
-            new_obs,
-            reward,
-            dones,
-            infos,
-        )
-
-        obs = self._last_obs
-        next_obs = new_obs
-
-        for i in range(len(buffer_actions)):
-            self.store_transition(
-                obs[i],
-                buffer_actions[i],
-                reward[i],
-                next_obs[i],
-                dones[i],
-                False,  # truncation
-                stream=0,
-            )
+    # def _store_transition(
+    #     self,
+    #     replay_buffer,
+    #     buffer_actions,
+    #     new_obs,
+    #     reward,
+    #     dones,
+    #     infos,
+    # ):
+    #     # keep SB3 happy
+    #     super()._store_transition(
+    #         replay_buffer,
+    #         buffer_actions,
+    #         new_obs,
+    #         reward,
+    #         dones,
+    #         infos,
+    #     )
+    #
+    #     obs = self._last_obs
+    #     next_obs = new_obs
+    #
+    #     for i in range(len(buffer_actions)):
+    #         self.store_transition(
+    #             obs[i],
+    #             buffer_actions[i],
+    #             reward[i],
+    #             next_obs[i],
+    #             dones[i],
+    #             False,  # truncation
+    #             stream=0,
+    #         )
 
 
 

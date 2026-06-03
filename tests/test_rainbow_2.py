@@ -3,7 +3,7 @@ import numpy as np
 
 from gymnasium import spaces
 
-from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER
+from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER, Rainbow
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
 
 def test_smoke_test():
@@ -88,3 +88,79 @@ def test_policy():
     action = policy._predict(obs)
 
     assert action.shape == (2,)
+
+
+class TestRainbowBufferInterface:
+
+    def test_replay_sample_structure(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        batch = model.replay_buffer.sample(8)
+
+        assert hasattr(batch, "observations")
+        assert hasattr(batch, "actions")
+        assert hasattr(batch, "next_observations")
+        assert hasattr(batch, "dones")
+        assert hasattr(batch, "rewards")
+        assert hasattr(batch, "idxs")
+        assert hasattr(batch, "weights")
+
+
+    def test_replay_sample_shapes_and_types(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        batch = model.replay_buffer.sample(8)
+
+        assert batch.observations.shape[0] == 8
+        assert batch.actions.shape[0] == 8
+        assert batch.next_observations.shape[0] == 8
+        assert batch.rewards.shape[0] == 8
+        assert batch.dones.shape[0] == 8
+
+        assert batch.observations.dtype == torch.float32
+        assert batch.actions.dtype == torch.int64
+        assert batch.rewards.dtype == torch.float32
+
+
+    def test_replay_sample_device(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        batch = model.replay_buffer.sample(8)
+
+        assert batch.observations.device == model.device
+        assert batch.next_observations.device == model.device
+        assert batch.weights.device == model.device
+
+
+class TestRainbowBufferPER:
+    pass # TODO fill in next
