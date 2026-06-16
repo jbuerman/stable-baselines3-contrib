@@ -36,8 +36,14 @@ class RainbowPolicy(BasePolicy):
         return self.q_net.qvals(obs)
 
     def _predict(self, obs, deterministic=True):
+        self.reset_noise()
         qvals = self.forward(obs)
         return qvals.argmax(dim=1)
+
+    def reset_noise(self):
+        for module in self.q_net.modules():
+            if isinstance(module, FactorizedNoisyLinear):
+                module.reset_noise()
 
 
 class FactorizedNoisyLinear(nn.Module):
