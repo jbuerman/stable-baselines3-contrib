@@ -207,6 +207,7 @@ class Rainbow(OffPolicyAlgorithm):
 
         weights = weights.squeeze().to(self.q_net.device)
         loss = (weights * kl_per_sample).mean()
+        self.last_loss = loss.item()
 
         loss.backward()
 
@@ -480,6 +481,8 @@ def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
     """
     batch_size = len(rewards)
     device = next_distr.device
+    rewards = rewards.to(device)
+    dones = dones.to(device)
     proj_distr = T.zeros((batch_size, n_atoms), dtype=T.float32, device=device)
     delta_z = (Vmax - Vmin) / (n_atoms - 1)
     for atom in range(n_atoms):

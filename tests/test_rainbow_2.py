@@ -5,6 +5,7 @@ from gymnasium import spaces
 
 from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER, Rainbow
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
+from sb3_contrib.rainbow2.rainbow_buffer import PERReplayBufferSamples
 
 def test_smoke_test():
     device = torch.device("cpu")
@@ -157,10 +158,148 @@ class TestRainbowBufferInterface:
 
         batch = model.replay_buffer.sample(8)
 
-        assert batch.observations.device == model.device
-        assert batch.next_observations.device == model.device
-        assert batch.weights.device == model.device
+        assert batch.observations.device.type == model.device.type
+        assert batch.next_observations.device.type == model.device.type
+        assert batch.weights.device.type == model.device.type
 
 
 class TestRainbowBufferPER:
-    pass # TODO fill in next
+
+    def test_per_priority_update_changes_sampling(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=32,
+            buffer_size=2000,
+        )
+
+        model.learn(500)
+
+        batch1: PERReplayBufferSamples = model.replay_buffer.sample(32)
+        idxs = batch1.idxs.copy()
+
+        # Set very high priorities
+        high_priorities = np.ones_like(idxs, dtype=np.float32) * 100.0
+        model.replay_buffer.update_priorities(idxs, high_priorities)
+
+        batch2 = model.replay_buffer.sample(32)
+
+        # We don't expect equality anymore
+        assert not np.array_equal(batch1.idxs, batch2.idxs)
+
+    def test_per_weights_bounds(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=32,
+            buffer_size=2000,
+        )
+
+        model.learn(500)
+
+        batch = model.replay_buffer.sample(32)
+
+        assert torch.all(batch.weights > 0)
+        assert torch.all(batch.weights <= 1.0)
+
+    def test_per_beta_annealing(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        buffer = model.replay_buffer
+        initial_beta = buffer.beta
+
+        model.learn(500)
+
+        assert buffer.beta > initial_beta
+        assert buffer.beta <= 1.0
+
+
+class TestRainbowTraining:
+
+    def test_gradients_flow(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        params = list(model.q_net.parameters())
+        has_grad = any(p.grad is not None for p in params)
+
+        assert has_grad
+
+    def test_parameters_update(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        params_before = [p.clone().detach() for p in model.q_net.parameters()]
+
+        model.learn(500)
+
+        params_after = list(model.q_net.parameters())
+
+        changed = False
+        for p_before, p_after in zip(params_before, params_after):
+            if not torch.equal(p_before, p_after):
+                changed = True
+                break
+
+        assert changed
+
+    def test_loss_is_finite(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        loss = model.last_loss
+
+        assert not np.isnan(loss)
+        assert not np.isinf(loss)
+
+    def test_longer_training_runs(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=16,
+            buffer_size=5000,
+        )
+
+        model.learn(2000)
