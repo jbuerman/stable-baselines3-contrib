@@ -1,11 +1,10 @@
-import torch
 import numpy as np
-
+import torch
 from gymnasium import spaces
 
 from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER, Rainbow
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
-from sb3_contrib.rainbow2.rainbow_buffer import PERReplayBufferSamples
+
 
 def test_smoke_test():
     device = torch.device("cpu")
@@ -305,16 +304,12 @@ class TestRainbowTraining:
         model.learn(2000)
 
 
-class RegressionVsAgent:
+class TestRegressionVsAgent:
     """
     These are to check Agent -> SB3 to ensure completeness. TODO should be removed before submitting to SB3
     """
 
     def test_action_shape_consistency_vs_agent(self):
-        import torch
-        import numpy as np
-        from sb3_contrib.rainbow2.rainbow import Agent
-
         env = make_env(1, "Pong", framestack=4, repeat_probs=0.0)
         obs, _ = env.reset()
 
@@ -348,9 +343,6 @@ class RegressionVsAgent:
         assert agent_action.shape == model_action.shape
 
     def test_short_training_behaviour_vs_agent(self):
-        import numpy as np
-        from sb3_contrib.rainbow2.rainbow import Agent
-
         env = make_env(1, "Pong", framestack=4, repeat_probs=0.0)
 
         obs, _ = env.reset()
