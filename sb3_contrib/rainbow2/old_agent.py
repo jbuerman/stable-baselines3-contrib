@@ -174,7 +174,15 @@ class Agent:
         if self.grad_steps % self.replace_target_cnt == 0:
             self.replace_target_network()
 
-        idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
+        batch = self.memory.sample(self.batch_size)
+        idxs = batch.idxs
+        states = batch.observations
+        actions = batch.actions
+        rewards = batch.rewards
+        next_states = batch.next_observations
+        dones = batch.dones
+        weights = batch.weights
+
 
         # use this code to check your states are correct if applying to a custom env
         # If you apply Rainbow to a custom env and don't check your states first, you are killing both
