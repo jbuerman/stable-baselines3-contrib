@@ -2,8 +2,10 @@ import numpy as np
 import torch
 from gymnasium import spaces
 
-from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER, Rainbow
-from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
+from sb3_contrib.rainbow2.rainbow import PER, Rainbow
+from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy, NatureC51
+from sb3_contrib.rainbow2.old_agent import Agent
+from sb3_contrib.rainbow2.main_agent import make_env
 
 
 def test_smoke_test():

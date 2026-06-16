@@ -1,5 +1,6 @@
-from sb3_contrib.rainbow2.rainbow import Rainbow, make_env
+from sb3_contrib.rainbow2.rainbow import Rainbow
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
+from sb3_contrib.rainbow2.main_agent import make_env
 
 
 def main():
