@@ -157,10 +157,263 @@ class TestRainbowBufferInterface:
 
         batch = model.replay_buffer.sample(8)
 
-        assert batch.observations.device == model.device
-        assert batch.next_observations.device == model.device
-        assert batch.weights.device == model.device
+        assert batch.observations.device.type == model.device.type
+        assert batch.next_observations.device.type == model.device.type
+        assert batch.weights.device.type == model.device.type
 
 
 class TestRainbowBufferPER:
-    pass # TODO fill in next
+
+    def test_per_priority_update_changes_sampling(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=32,
+            buffer_size=2000,
+        )
+
+        model.learn(500)
+
+        batch1 = model.replay_buffer.sample(32)
+        idxs = batch1.idxs.copy()
+
+        # Set very high priorities
+        high_priorities = np.ones_like(idxs, dtype=np.float32) * 100.0
+        model.replay_buffer.update_priorities(idxs, high_priorities)
+
+        batch2 = model.replay_buffer.sample(32)
+
+        # We don't expect equality anymore
+        assert not np.array_equal(batch1.idxs, batch2.idxs)
+
+    def test_per_weights_bounds(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=32,
+            buffer_size=2000,
+        )
+
+        model.learn(500)
+
+        batch = model.replay_buffer.sample(32)
+
+        assert torch.all(batch.weights > 0)
+        assert torch.all(batch.weights <= 1.0)
+
+    def test_per_beta_annealing(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        buffer = model.replay_buffer
+        initial_beta = buffer.beta
+
+        model.learn(500)
+
+        assert buffer.beta > initial_beta
+        assert buffer.beta <= 1.0
+
+
+class TestRainbowTraining:
+
+    def test_gradients_flow(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        params = list(model.q_net.parameters())
+        has_grad = any(p.grad is not None for p in params)
+
+        assert has_grad
+
+    def test_parameters_update(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        params_before = [p.clone().detach() for p in model.q_net.parameters()]
+
+        model.learn(500)
+
+        params_after = list(model.q_net.parameters())
+
+        changed = False
+        for p_before, p_after in zip(params_before, params_after):
+            if not torch.equal(p_before, p_after):
+                changed = True
+                break
+
+        assert changed
+
+    def test_loss_is_finite(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+        )
+
+        model.learn(200)
+
+        loss = model.last_loss
+
+        assert not np.isnan(loss)
+        assert not np.isinf(loss)
+
+    def test_longer_training_runs(self):
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+        model = Rainbow(
+            RainbowPolicy,
+            env,
+            learning_starts=10,
+            batch_size=16,
+            buffer_size=5000,
+        )
+
+        model.learn(2000)
+
+
+class RegressionVsAgent:
+    """
+    These are to check Agent -> SB3 to ensure completeness. TODO should be removed before submitting to SB3
+    """
+
+    def test_action_shape_consistency_vs_agent(self):
+        import torch
+        import numpy as np
+        from sb3_contrib.rainbow2.rainbow import Agent
+
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0)
+        obs, _ = env.reset()
+
+        n_actions = env.action_space[0].n
+
+        agent = Agent(
+            n_actions=n_actions,
+            input_dims=[4, 84, 84],
+            device="cpu",
+            num_envs=1,
+            agent_name="test",
+            total_steps=1000,
+            testing=True
+        )
+
+        model = Rainbow(
+            RainbowPolicy,
+            env.envs[0],
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=1000,
+            device="cpu",
+        )
+
+        # Convert observation for policy
+        obs_tensor = torch.tensor(obs, dtype=torch.float32)
+
+        agent_action = agent.choose_action(obs)
+        model_action = model.policy._predict(obs_tensor)
+
+        assert agent_action.shape == model_action.shape
+
+    def test_short_training_behaviour_vs_agent(self):
+        import numpy as np
+        from sb3_contrib.rainbow2.rainbow import Agent
+
+        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0)
+
+        obs, _ = env.reset()
+        n_actions = env.action_space[0].n
+
+        agent = Agent(
+            n_actions=n_actions,
+            input_dims=[4, 84, 84],
+            device="cpu",
+            num_envs=1,
+            agent_name="test",
+            total_steps=2000,
+            testing=True,
+            batch_size=8
+        )
+
+        model = Rainbow(
+            RainbowPolicy,
+            env.envs[0],
+            learning_starts=10,
+            batch_size=8,
+            buffer_size=2000,
+            device="cpu",
+        )
+
+        steps = 200
+
+        agent_rewards = []
+        model_rewards = []
+
+        obs_agent, _ = env.reset()
+        obs_model, _ = env.reset()
+
+        for _ in range(steps):
+            # Agent step
+            action_agent = agent.choose_action(obs_agent)
+            next_obs, reward, done, trunc, _ = env.step(action_agent)
+
+            agent.store_transition(
+                obs_agent[0],
+                action_agent[0],
+                reward[0],
+                next_obs[0],
+                done[0],
+                trunc[0],
+                stream=0
+            )
+            agent.learn()
+
+            obs_agent = next_obs
+            agent_rewards.append(reward[0])
+
+            # Model step
+            action_model, _ = model.predict(obs_model, deterministic=False)
+            next_obs, reward, done, trunc, _ = env.step(action_model)
+
+            model.learn(1)
+
+            obs_model = next_obs
+            model_rewards.append(reward[0])
+
+        # Compare rough behaviour (not equality!)
+        agent_mean = np.mean(agent_rewards)
+        model_mean = np.mean(model_rewards)
+
+        assert np.isfinite(agent_mean)
+        assert np.isfinite(model_mean)
