@@ -5,6 +5,7 @@ from gymnasium import spaces
 
 from sb3_contrib.rainbow2.rainbow import Agent, make_env, NatureC51, PER, Rainbow
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy
+from sb3_contrib.rainbow2.rainbow_buffer import PERReplayBufferSamples
 
 def test_smoke_test():
     device = torch.device("cpu")
