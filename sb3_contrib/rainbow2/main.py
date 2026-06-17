@@ -7,11 +7,11 @@ from copy import deepcopy
 import gymnasium as gym
 import numpy as np
 import torch
-import torch as T
 import ale_py
 
 from sb3_contrib.rainbow2.rainbow import Rainbow
 from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy, FactorizedNoisyLinear
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 
 def choose_eval_action(observation, eval_net, device):
@@ -30,18 +30,16 @@ def choose_eval_action(observation, eval_net, device):
 
 
 def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True):
-    return gym.vector.SyncVectorEnv(
-        [
-            lambda: gym.wrappers.FrameStackObservation(
-                gym.wrappers.AtariPreprocessing(
-                    gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
-                    terminal_on_life_loss=terminal_on_life_loss
-                ),
-                framestack
-            )
-            for _ in range(envs_create)
-        ]
-    )
+    def make_single_env():
+        return gym.wrappers.FrameStackObservation(
+            gym.wrappers.AtariPreprocessing(
+                gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
+                terminal_on_life_loss=terminal_on_life_loss,
+            ),
+            framestack,
+        )
+
+    return DummyVecEnv([make_single_env for _ in range(envs_create)])
 
 
 def non_default_args(args, parser):
@@ -227,8 +225,8 @@ def main():
 
     env = make_env(num_envs, game, framestack, repeat_probs)
     print(env.observation_space)
-    print(env.action_space[0])
-    n_actions = env.action_space[0].n
+    print(env.action_space)
+    n_actions = env.action_space.n
 
     agent = Rainbow(
         RainbowPolicy,
@@ -248,7 +246,7 @@ def main():
     current_eval = 0
     scores_count = [0 for i in range(num_envs)]
     scores = []
-    observation, info = env.reset()
+    observation = env.reset()
     processes = []
 
     while steps < n_steps:
@@ -256,13 +254,14 @@ def main():
         action, _ = agent.predict(observation, deterministic=False)
 
         # sync vector env: step then learn (no overlap possible)
-        observation_, reward, done_, trun_, info = env.step(action)
+        observation_, reward, done_, info = env.step(action)
         agent.learn(total_timesteps=num_envs, reset_num_timesteps=False)
 
         # this just tracks the score for each environment
         for i in range(num_envs):
+            trun_i = info[i].get("TimeLimit.truncated", False)
             scores_count[i] += reward[i]
-            if done_[i] or trun_[i]:
+            if done_[i] or trun_i:
                 episodes += 1
                 scores.append([scores_count[i], steps])
                 scores_temp.append(scores_count[i])

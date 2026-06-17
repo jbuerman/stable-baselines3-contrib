@@ -184,12 +184,8 @@ class PER(ReplayBuffer):
             act = action[i]
             rew = reward[i]
             dn = done[i]
-
-            # SB3 does not explicitly pass truncation here
-            trun = False
-
-            # You are currently using a single stream
-            stream = 0
+            trun = infos[i].get("TimeLimit.truncated", False)
+            stream = i
 
             self.append(state, act, rew, next_state, dn, trun, stream, prio=True)
 

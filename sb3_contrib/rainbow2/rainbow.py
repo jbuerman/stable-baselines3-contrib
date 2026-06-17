@@ -34,6 +34,7 @@ class Rainbow(OffPolicyAlgorithm):
             gamma=gamma,
             train_freq=train_freq,
             gradient_steps=gradient_steps,
+            support_multi_env = True,
             **kwargs,
         )
 
@@ -65,7 +66,7 @@ class Rainbow(OffPolicyAlgorithm):
             device=self.device,
             rgb=self.rgb,
             n=self.n,
-            envs=1,
+            envs=self.env.num_envs,
             gamma=self.gamma,
         )
 
