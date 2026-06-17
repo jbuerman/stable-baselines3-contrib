@@ -21,7 +21,12 @@ class Rainbow(OffPolicyAlgorithm):
         train_freq=(1, "step"),
         gradient_steps=1,
         init_setup_model=True,
-        rgb=False,    
+        rgb=False,
+        framestack=4,
+        per_alpha=0.5,
+        max_mem_size=1048576,
+        imagex=84,
+        imagey=84,
         **kwargs,
     ):
         super().__init__(
@@ -52,6 +57,13 @@ class Rainbow(OffPolicyAlgorithm):
         self.rgb = rgb
         self.per_beta = 0.4
 
+        self.max_mem_size = max_mem_size
+        self.per_alpha = per_alpha
+        self.per_beta = 0.4
+        self.framestack = framestack
+        self.imagex = imagex
+        self.imagey = imagey
+
         if init_setup_model:
             self._setup_model()
 
@@ -62,12 +74,17 @@ class Rainbow(OffPolicyAlgorithm):
         self.q_net_target = self.policy.q_net_target
 
         self.per_buffer = PER(
-            size=100_000,  # TODO small for now
+            size=self.max_mem_size,
             device=self.device,
             rgb=self.rgb,
             n=self.n,
             envs=self.env.num_envs,
             gamma=self.gamma,
+            alpha=self.per_alpha,
+            beta=self.per_beta,
+            framestack=self.framestack,
+            imagex=self.imagex,
+            imagey=self.imagey,
         )
 
         self.replay_buffer = self.per_buffer
