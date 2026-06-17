@@ -9,8 +9,8 @@ import numpy as np
 import torch
 import ale_py
 
-from sb3_contrib.rainbow2.rainbow import Rainbow
-from sb3_contrib.rainbow2.rainbow_policy import RainbowPolicy, FactorizedNoisyLinear
+from sb3_contrib.rainbow.rainbow import Rainbow
+from sb3_contrib.rainbow.rainbow_policy import RainbowPolicy, FactorizedNoisyLinear
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 

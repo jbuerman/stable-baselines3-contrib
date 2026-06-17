@@ -10,7 +10,7 @@ import torch
 import torch as T
 import ale_py
 
-from sb3_contrib.rainbow2.old_agent import Agent
+from sb3_contrib.rainbow.old_agent import Agent
 
 
 def choose_eval_action(observation, eval_net, device):
