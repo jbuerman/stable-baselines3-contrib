@@ -112,12 +112,6 @@ class Rainbow(OffPolicyAlgorithm):
     def _sample_buffer(self):
         return self.replay_buffer.sample(self.batch_size)
 
-    # def _store_to_replay_buffer(self, state, action, reward, next_state, done, trun, stream, prio=True):
-    #     self.per_buffer.append(state, action, reward, next_state, done, trun, stream, prio=prio)
-    #
-    #     # keep PER annealing
-    #     self.per_buffer.beta = min(self.per_beta + self.priority_weight_increase, 1.0)
-
     def _train_call(self):
         if self.num_timesteps < self.learning_starts:
             return
