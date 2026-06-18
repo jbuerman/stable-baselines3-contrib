@@ -236,6 +236,7 @@ def main():
         batch_size=bs,
         gamma=discount,
         device=device,
+        total_timesteps=total_steps,
     )
 
     scores_temp = []

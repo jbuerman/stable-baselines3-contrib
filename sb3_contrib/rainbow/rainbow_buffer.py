@@ -143,6 +143,7 @@ class PER(ReplayBuffer):
         self.alpha = alpha
         self.beta = beta
         self.beta_increment = 0.0
+        self._per_beta_increment = 0.0
         self.eps = 1e-6  # small constant to stop 0 probability
         self.device = device
 
@@ -175,6 +176,14 @@ class PER(ReplayBuffer):
 
         self.overlap = self.framestack - self.n_step
 
+    @property
+    def per_beta_increment(self):
+        return self._per_beta_increment
+
+    @per_beta_increment.setter
+    def per_beta_increment(self, beta_increment):
+        self._per_beta_increment = beta_increment
+
     def add(self, obs, next_obs, action, reward, done, infos):
         batch_size = len(action)
 
@@ -189,7 +198,7 @@ class PER(ReplayBuffer):
 
             self.append(state, act, rew, next_state, dn, trun, stream, prio=True)
 
-        self.beta = min(self.beta + self.beta_increment, 1.0)
+        self.beta = min(self.beta + self._per_beta_increment, 1.0)
 
     def append(self, state, action, reward, n_state, done, trun, stream, prio=True):
 

@@ -13,13 +13,14 @@ class Rainbow(OffPolicyAlgorithm):
         self,
         policy,
         env,
+        total_timesteps,
         learning_rate=6.25e-5,
         buffer_size=1_000_000,
         learning_starts=20000,
         batch_size=32,
         gamma=0.99,
         train_freq=(1, "step"),
-        gradient_steps=1,
+        gradient_steps=16,
         init_setup_model=True,
         rgb=False,
         framestack=4,
@@ -64,6 +65,8 @@ class Rainbow(OffPolicyAlgorithm):
         self.imagex = imagex
         self.imagey = imagey
 
+        self.total_timesteps = total_timesteps
+
         if init_setup_model:
             self._setup_model()
 
@@ -88,6 +91,13 @@ class Rainbow(OffPolicyAlgorithm):
         )
 
         self.replay_buffer = self.per_buffer
+        beta_start = self.replay_buffer.beta
+        self.replay_buffer.beta_increment = (
+                (1.0 - beta_start) / (self.total_timesteps * self.n_envs)
+        )
+        self.replay_buffer.per_beta_increment = (
+                (1.0 - beta_start) / (self.total_timesteps * self.n_envs)
+        )
 
     def _setup_learn(self, total_timesteps, *args, **kwargs):
         self.priority_weight_increase = (
