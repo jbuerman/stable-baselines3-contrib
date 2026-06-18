@@ -227,7 +227,7 @@ class Rainbow(OffPolicyAlgorithm):
         self.grad_steps += 1
         if self.grad_steps % 10000 == 0:
             print("Completed " + str(self.grad_steps) + " gradient steps")
-        if self.grad_steps % 1000 == 0:
+        if self.grad_steps % 10000 == 0:
             print(f"Beta: {self.replay_buffer.beta}")
 
 
