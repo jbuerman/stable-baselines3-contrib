@@ -224,19 +224,28 @@ def main():
     print("Device: " + str(device))
 
     env = make_env(num_envs, game, framestack, repeat_probs)
-    print(env.observation_space)
-    print(env.action_space)
+    print(f"Observation Space: {env.observation_space}")
+    print(f"Action Space: {env.action_space}")
     n_actions = env.action_space.n
 
     agent = Rainbow(
         RainbowPolicy,
         env,
+        total_timesteps=n_steps,
+        target_replace=c,
+        gamma=discount,
+        per_alpha=per_alpha,
+        n=nstep,
+        grad_clip=grad_clip,
+        spi=spi,
         learning_starts=20000,
         buffer_size=1048576,
         batch_size=bs,
-        gamma=discount,
+        learning_rate=lr,
         device=device,
-        total_timesteps=total_steps,
+        policy_kwargs=dict(
+            linear_size=linear_size
+        ),
     )
 
     scores_temp = []
@@ -245,7 +254,7 @@ def main():
     last_time = time.time()
     episodes = 0
     current_eval = 0
-    scores_count = [0 for i in range(num_envs)]
+    scores_count = [0 for _ in range(num_envs)]
     scores = []
     observation = env.reset()
     processes = []

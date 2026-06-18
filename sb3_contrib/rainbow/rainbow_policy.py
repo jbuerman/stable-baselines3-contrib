@@ -12,22 +12,26 @@ from stable_baselines3.common.policies import BasePolicy
 
 
 class RainbowPolicy(BasePolicy):
-    def __init__(self, observation_space, action_space, lr_schedule, **kwargs):
+    def __init__(self, observation_space, action_space, lr_schedule, linear_size=512, **kwargs):
         super().__init__(observation_space, action_space, lr_schedule)
 
         obs_shape = observation_space.shape
         n_actions = action_space.n
 
+        self.linear_size = linear_size
+
         self.q_net = NatureC51(
             in_depth=obs_shape[0],
             actions=n_actions,
             device=self.device,
+            linear_size=linear_size,
         )
 
         self.q_net_target = NatureC51(
             in_depth=obs_shape[0],
             actions=n_actions,
             device=self.device,
+            linear_size=linear_size,
         )
 
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr_schedule(1), eps=1.5e-4)
@@ -146,10 +150,10 @@ class NatureC51(nn.Module):
         conv_out_size = 3136
 
         # Noisy Linear Layers, with both value and advantage functions for dueling DQN
-        self.fc1V = FactorizedNoisyLinear(conv_out_size, linear_size)
-        self.fc1A = FactorizedNoisyLinear(conv_out_size, linear_size)
-        self.fcV2 = FactorizedNoisyLinear(linear_size, self.atoms)
-        self.fcA2 = FactorizedNoisyLinear(linear_size, actions * self.atoms)
+        self.fc1V = FactorizedNoisyLinear(conv_out_size, self.linear_size)
+        self.fc1A = FactorizedNoisyLinear(conv_out_size, self.linear_size)
+        self.fcV2 = FactorizedNoisyLinear(self.linear_size, self.atoms)
+        self.fcA2 = FactorizedNoisyLinear(self.linear_size, actions * self.atoms)
 
         self.register_buffer("supports", torch.arange(Vmin, Vmax+DELTA_Z, DELTA_Z))
         self.softmax = nn.Softmax(dim=1)

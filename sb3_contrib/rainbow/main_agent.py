@@ -219,8 +219,8 @@ def main():
     print("Device: " + str(device))
 
     env = make_env(num_envs, game, framestack, repeat_probs)
-    print(env.observation_space)
-    print(env.action_space[0])
+    print(f"Observation Space: {env.observation_space}")
+    print(f"Action Space: {env.action_space[0]}")
     n_actions = env.action_space[0].n
 
     agent = Agent(n_actions=env.action_space[0].n, input_dims=[framestack, 84, 84], device=device, num_envs=num_envs,

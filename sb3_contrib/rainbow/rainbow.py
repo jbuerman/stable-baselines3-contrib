@@ -7,29 +7,38 @@ from stable_baselines3.common.type_aliases import TrainFreq, TrainFrequencyUnit
 from sb3_contrib.rainbow.rainbow_buffer import PER
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear
 
-
 class Rainbow(OffPolicyAlgorithm):
     def __init__(
         self,
         policy,
         env,
-        total_timesteps,
+        total_timesteps=None,
+        target_replace=2000,
+        per_alpha=0.5,
+        gamma=0.99,
+        max_mem_size=1048576,
+        n=3,
+        grad_clip=10,
+        spi=16,
         learning_rate=6.25e-5,
         buffer_size=1_000_000,
         learning_starts=20000,
         batch_size=32,
-        gamma=0.99,
-        train_freq=(1, "step"),
-        gradient_steps=16,
-        init_setup_model=True,
         rgb=False,
         framestack=4,
-        per_alpha=0.5,
-        max_mem_size=1048576,
         imagex=84,
         imagey=84,
-        **kwargs,
+        init_setup_model=True,
+        policy_kwargs=None,
+        **kwargs
     ):
+        train_freq = (spi, "step")
+        gradient_steps = spi
+
+        policy_kwargs = policy_kwargs or {}
+        if not "linear_size" in policy_kwargs:
+            policy_kwargs["linear_size"] = 512
+
         super().__init__(
             policy=policy,
             env=env,
@@ -40,23 +49,21 @@ class Rainbow(OffPolicyAlgorithm):
             gamma=gamma,
             train_freq=train_freq,
             gradient_steps=gradient_steps,
+            policy_kwargs=policy_kwargs,
             support_multi_env = True,
             **kwargs,
         )
 
-        if isinstance(self.train_freq, tuple):
-            self.train_freq = TrainFreq(train_freq[0], TrainFrequencyUnit(train_freq[1]))
-
+        self.spi = spi
         self.grad_steps = 0
-        self.replace_target_cnt = 2000  # or your original logic
+        self.replace_target_cnt = target_replace
         self.Vmin = -10
         self.Vmax = 10
         self.N_ATOMS = 51
-        self.n = 3
-        self.grad_clip = 10
-        
+        self.n = n
+        self.grad_clip = grad_clip
+
         self.rgb = rgb
-        self.per_beta = 0.4
 
         self.max_mem_size = max_mem_size
         self.per_alpha = per_alpha
@@ -66,6 +73,7 @@ class Rainbow(OffPolicyAlgorithm):
         self.imagey = imagey
 
         self.total_timesteps = total_timesteps
+        self._beta_initialized = False
 
         if init_setup_model:
             self._setup_model()
@@ -91,13 +99,6 @@ class Rainbow(OffPolicyAlgorithm):
         )
 
         self.replay_buffer = self.per_buffer
-        beta_start = self.replay_buffer.beta
-        self.replay_buffer.beta_increment = (
-                (1.0 - beta_start) / (self.total_timesteps * self.n_envs)
-        )
-        self.replay_buffer.per_beta_increment = (
-                (1.0 - beta_start) / (self.total_timesteps * self.n_envs)
-        )
 
     def _setup_learn(self, total_timesteps, *args, **kwargs):
         self.priority_weight_increase = (
@@ -109,6 +110,21 @@ class Rainbow(OffPolicyAlgorithm):
     def train(self, gradient_steps, batch_size):        
         for _ in range(gradient_steps):
             self._train_call()
+
+    def learn(self, total_timesteps, *args, **kwargs):
+        if not self._beta_initialized:
+            effective_total = (
+                self.total_timesteps
+                if self.total_timesteps is not None
+                else total_timesteps
+            )
+            beta_start = self.replay_buffer.beta
+            self.replay_buffer.per_beta_increment = (
+                    (1.0 - beta_start) / (effective_total * self.n_envs)
+            )
+            self._beta_initialized = True
+
+        return super().learn(total_timesteps, *args, **kwargs)
 
     @torch.no_grad()
     def reset_noise(self, net):
@@ -211,6 +227,8 @@ class Rainbow(OffPolicyAlgorithm):
         self.grad_steps += 1
         if self.grad_steps % 10000 == 0:
             print("Completed " + str(self.grad_steps) + " gradient steps")
+        if self.grad_steps % 1000 == 0:
+            print(f"Beta: {self.replay_buffer.beta}")
 
 
 def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
