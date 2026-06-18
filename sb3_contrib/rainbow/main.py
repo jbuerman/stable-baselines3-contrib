@@ -11,7 +11,7 @@ import ale_py
 
 from sb3_contrib.rainbow.rainbow import Rainbow
 from sb3_contrib.rainbow.rainbow_policy import RainbowPolicy, FactorizedNoisyLinear
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 
 def choose_eval_action(observation, eval_net, device):
@@ -38,8 +38,7 @@ def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=
             ),
             framestack,
         )
-
-    return DummyVecEnv([make_single_env for _ in range(envs_create)])
+    return SubprocVecEnv([make_single_env for _ in range(envs_create)])
 
 
 def non_default_args(args, parser):
@@ -226,7 +225,11 @@ def main():
     env = make_env(num_envs, game, framestack, repeat_probs)
     print(f"Observation Space: {env.observation_space}")
     print(f"Action Space: {env.action_space}")
-    n_actions = env.action_space.n
+    if hasattr(env.action_space, "n"):
+        n_actions = env.action_space.n
+    else:
+        # Take first if multiple discrete
+        n_actions = env.action_space.nvec[0]
 
     agent = Rainbow(
         RainbowPolicy,
