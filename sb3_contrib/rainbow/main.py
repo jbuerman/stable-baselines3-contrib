@@ -3,42 +3,53 @@ import multiprocessing as mp
 import os
 import time
 from copy import deepcopy
+from functools import partial
 
+import ale_py
 import gymnasium as gym
 import numpy as np
 import torch
-import ale_py
+from stable_baselines3.common.atari_wrappers import ClipRewardEnv
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from sb3_contrib.rainbow.rainbow import Rainbow
-from sb3_contrib.rainbow.rainbow_policy import RainbowPolicy, FactorizedNoisyLinear
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
 
 
 def choose_eval_action(observation, eval_net, device):
+    # evaluation protocol: greedy actions, noisy-net noise disabled
+    # noise is zeroed once on the eval net after loading, do not reset it here
     with torch.no_grad():
         state = torch.tensor(observation, dtype=torch.float32).to(device)
-
-        # IMPORTANT: reset noisy layers for stochasticity if needed
-        for m in eval_net.modules():
-            if isinstance(m, FactorizedNoisyLinear):
-                m.reset_noise()
-
         qvals = eval_net.qvals(state, advantages_only=True)
         action = torch.argmax(qvals, dim=1).cpu()
-
     return action
 
 
-def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True):
+def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True, clip_rewards=True):
+    """Build the vectorized Atari env.
+
+    Wrapper order matters: Monitor sits below ClipRewardEnv so logged episode
+    returns info["episode"]["r"] are raw game scores, while the agent trains on
+    clipped rewards. Evaluation envs disable clipping so scores read directly
+    from step() are raw.
+    """
     def make_single_env():
-        return gym.wrappers.FrameStackObservation(
-            gym.wrappers.AtariPreprocessing(
-                gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
-                terminal_on_life_loss=terminal_on_life_loss,
-            ),
-            framestack,
-        )
+        env = gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs)
+        env = gym.wrappers.AtariPreprocessing(env, terminal_on_life_loss=terminal_on_life_loss)
+        env = Monitor(env)
+        if clip_rewards:
+            env = ClipRewardEnv(env)
+        env = gym.wrappers.FrameStackObservation(env, framestack)
+        return env
+
     return SubprocVecEnv([make_single_env for _ in range(envs_create)])
+
+
+def create_network(framestack, n_actions, device, linear_size):
+    return NatureC51(framestack, n_actions, device=device, linear_size=linear_size)
 
 
 def non_default_args(args, parser):
@@ -65,11 +76,18 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
                    n_actions, device, index, framestack, repeat_probs):
 
     # paper evaluates on full episodes (life loss is NOT terminal during eval)
-    eval_env = make_env(eval_envs, game, framestack, repeat_probs, terminal_on_life_loss=False)
+    eval_env = make_env(
+        eval_envs,
+        game,
+        framestack,
+        repeat_probs,
+        terminal_on_life_loss=False,
+        clip_rewards=False,
+    )
     evals = []
     eval_episodes = 0
     eval_scores = np.array([0 for i in range(eval_envs)])
-    eval_observation, eval_info = eval_env.reset()
+    eval_observation = eval_env.reset()
 
     eval_net = network_creator()
 
@@ -78,11 +96,14 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
 
     eval_net.load_state_dict(state_dict_gpu)
 
+    for m in eval_net.modules():
+        if isinstance(m, FactorizedNoisyLinear):
+            m.disable_noise()
+
     while eval_episodes < num_eval_episodes:
 
         eval_action = choose_eval_action(eval_observation, eval_net, device)
-        eval_observation_, eval_reward, eval_done_, eval_trun_, eval_info = eval_env.step(eval_action)
-        eval_done_ = np.logical_or(eval_done_, eval_trun_)
+        eval_observation_, eval_reward, eval_done_, eval_info = eval_env.step(eval_action)
 
         for i in range(eval_envs):
             eval_scores[i] += eval_reward[i]
@@ -106,6 +127,155 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
 
         # Save the updated array back to the file
         np.save(fname, data)
+    eval_env.close()
+
+
+class RainbowLoopCallback(BaseCallback):
+    """Replaces the old hand-rolled training loop.
+
+    The env must only be stepped by SB3's learn(). This callback reproduces
+    the old loop's responsibilities: raw-score tracking via Monitor,
+    progress printing, periodic evaluation in a background process and
+    model checkpoints.
+    """
+
+    def __init__(
+        self,
+        agent_name,
+        game,
+        testing,
+        include_evals,
+        eval_every,
+        eval_envs,
+        num_eval_episodes,
+        framestack,
+        repeat_probs,
+        n_actions,
+        device,
+        linear_size,
+        total_steps,
+        print_every=10_000,
+    ):
+        super().__init__()
+        self.agent_name = agent_name
+        self.game = game
+        self.testing = testing
+        self.include_evals = include_evals
+        self.eval_every = eval_every
+        self.eval_envs = eval_envs
+        self.num_eval_episodes = num_eval_episodes
+        self.framestack = framestack
+        self.repeat_probs = repeat_probs
+        self.n_actions = n_actions
+        self.eval_device = device
+        self.linear_size = linear_size
+        self.total_steps = total_steps
+        self.print_every = print_every
+
+        self.scores = []
+        self.scores_temp = []
+        self.episodes = 0
+        self.current_eval = 0
+        self.next_print = print_every
+        self.last_steps = 0
+        self.last_time = time.time()
+        self.last_eval_step = -1
+        self.processes = []
+
+    def _on_step(self):
+        for info in self.locals["infos"]:
+            ep = info.get("episode")
+            if ep is not None:
+                self.episodes += 1
+                self.scores.append([ep["r"], self.num_timesteps])
+                self.scores_temp.append(ep["r"])
+
+        if self.num_timesteps >= self.next_print and len(self.scores) > 0:
+            avg_score = np.mean(self.scores_temp[-50:])
+            now = time.time()
+            fps = (self.num_timesteps - self.last_steps) / (now - self.last_time)
+
+            print(
+                "{} {} avg score {:.2f} total_steps {:.0f} fps {:.2f} games {}".format(
+                    self.agent_name,
+                    self.game,
+                    avg_score,
+                    self.num_timesteps,
+                    fps,
+                    self.episodes,
+                ),
+                flush=True,
+            )
+
+            self.last_steps = self.num_timesteps
+            self.last_time = now
+            self.next_print += self.print_every
+
+        if self.num_timesteps >= self.next_eval:
+            self._run_eval()
+            self.next_eval += self.eval_every
+
+        return True
+
+    def _run_eval(self):
+        print("Evaluating")
+        self.last_eval_step = self.num_timesteps
+
+        if not self.testing and (self.current_eval + 1) in (1, 10, 50, 100, 150, 200):
+            self.model.q_net.save_checkpoint(
+                self.agent_name + "_" + str(int(self.num_timesteps // 250000)) + "M"
+            )
+
+        if not self.testing:
+            np.save(self.agent_name + "Experiment.npy", np.array(self.scores))
+
+        if self.include_evals:
+            for process in self.processes:
+                process.join()
+            self.processes = []
+
+            self.model.disable_noise(self.model.q_net)
+            net_state_dict = deepcopy({k: v.cpu() for k, v in self.model.q_net.state_dict().items()})
+            network_creator = partial(
+                create_network,
+                self.framestack,
+                self.n_actions,
+                self.eval_device,
+                self.linear_size,
+            )
+
+            eval_process = mp.Process(
+                target=evaluate_agent,
+                args=(
+                    net_state_dict,
+                    network_creator,
+                    self.eval_envs,
+                    self.num_eval_episodes,
+                    self.agent_name,
+                    self.testing,
+                    self.game,
+                    self.n_actions,
+                    self.eval_device,
+                    self.current_eval,
+                    self.framestack,
+                    self.repeat_probs,
+                ),
+            )
+            eval_process.start()
+            self.processes.append(eval_process)
+
+        self.current_eval += 1
+
+    def _on_training_end(self):
+        if self.last_eval_step < self.total_steps:
+            self._run_eval()
+
+        if not self.testing:
+            np.save(self.agent_name + "Experiment.npy", np.array(self.scores))
+
+        for process in self.processes:
+            process.join()
+        self.processes = []
 
 
 def main():
@@ -137,7 +307,12 @@ def main():
     parser.add_argument('--target_replace_frames', type=int, default=32_000)  # target network update frequency in frames
     parser.add_argument('--linear_size', type=int, default=512)  # linear size of the network
     parser.add_argument('--per_alpha', type=float, default=0.5)  # priority exponent for PER
-    parser.add_argument('--spi', type=int, default=16)  # Samples per insert ratio (SPI). This is the same as Rainbow DQN.
+    # gradient steps per env-transition. Rainbow paper: one batch-32 update every
+    # 4 agent steps -> 0.25. With 64 envs this is 16 gradient steps per vector step.
+    parser.add_argument('--replay_ratio', type=float, default=0.25)
+    # torch.compile with mode="max-autotune" (significant speedup; CUDA + Linux only,
+    # silently skipped elsewhere). 0 disables.
+    parser.add_argument("--compile", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -145,12 +320,15 @@ def main():
     formatted_string = format_arguments(arg_string)
     print(formatted_string)
 
+    compile_mode = "max-autotune" if args.compile else None
+
     game = args.game
     envs = args.envs
     bs = args.bs
     # convert target-replace period from environment frames to gradient steps.
-    # frames / 4 → env-steps; / envs → main-loop iterations; * spi → gradient steps.
-    c = int((args.target_replace_frames / 4) * args.spi / envs)
+    # frames / 4 -> env-steps; * replay_ratio -> gradient steps.
+    # 32k frames at replay_ratio=0.25 gives 2000 gradient steps, independent of env count.
+    c = int((args.target_replace_frames / 4) * args.replay_ratio)
     lr = args.lr
 
     num_eval_episodes = args.num_eval_episodes
@@ -164,7 +342,7 @@ def main():
     linear_size = args.linear_size
     total_steps = args.frames // 4
     per_alpha = args.per_alpha
-    spi = args.spi
+    replay_ratio = args.replay_ratio
 
     lr_str = "{:e}".format(lr)
     lr_str = str(lr_str).replace(".", "").replace("0", "")
@@ -240,98 +418,36 @@ def main():
         per_alpha=per_alpha,
         n=nstep,
         grad_clip=grad_clip,
-        spi=spi,
+        replay_ratio=replay_ratio,
+        compile_mode=compile_mode,
         learning_starts=20000,
         buffer_size=1048576,
         batch_size=bs,
         learning_rate=lr,
         device=device,
-        policy_kwargs=dict(
-            linear_size=linear_size
-        ),
+        policy_kwargs=dict(linear_size=linear_size),
     )
 
-    scores_temp = []
-    steps = 0
-    last_steps = 0
-    last_time = time.time()
-    episodes = 0
-    current_eval = 0
-    scores_count = [0 for _ in range(num_envs)]
-    scores = []
-    observation = env.reset()
-    processes = []
+    callback = RainbowLoopCallback(
+        agent_name=agent_name,
+        game=game,
+        testing=testing,
+        include_evals=include_evals,
+        eval_every=eval_every,
+        eval_envs=eval_envs,
+        num_eval_episodes=num_eval_episodes,
+        framestack=framestack,
+        repeat_probs=repeat_probs,
+        n_actions=n_actions,
+        device=device,
+        linear_size=linear_size,
+        total_steps=n_steps,
+    )
 
-    while steps < n_steps:
-        steps += num_envs
-        action, _ = agent.predict(observation, deterministic=False)
+    # Single learn() call: SB3 owns the env-stepping loop.
+    agent.learn(total_timesteps=n_steps, callback=callback)
 
-        # sync vector env: step then learn (no overlap possible)
-        observation_, reward, done_, info = env.step(action)
-        agent.learn(total_timesteps=num_envs, reset_num_timesteps=False)
-
-        # this just tracks the score for each environment
-        for i in range(num_envs):
-            trun_i = info[i].get("TimeLimit.truncated", False)
-            scores_count[i] += reward[i]
-            if done_[i] or trun_i:
-                episodes += 1
-                scores.append([scores_count[i], steps])
-                scores_temp.append(scores_count[i])
-                scores_count[i] = 0
-
-        # reward clipping
-        reward = np.clip(reward, -1., 1.)
-
-        observation = observation_
-
-        # print progress
-        if steps % 1200 == 0 and len(scores) > 0:
-            avg_score = np.mean(scores_temp[-50:])
-            if episodes % 1 == 0:
-                print('{} {} avg score {:.2f} total_steps {:.0f} fps {:.2f} games {}'
-                      .format(agent_name, game, avg_score, steps, (steps - last_steps) / (time.time() - last_time), episodes),
-                      flush=True)
-                last_steps = steps
-                last_time = time.time()
-
-        # Evaluation
-        if steps >= next_eval or steps >= n_steps:
-            print("Evaluating")
-
-            # Save model
-            if not testing and (current_eval + 1) == 1 or (current_eval + 1) == 10 or (current_eval + 1) == 50\
-                    or (current_eval + 1) == 100 or (current_eval + 1) == 150 or (current_eval + 1) == 200:
-                agent.save_model()
-
-            fname = agent_name + "Experiment.npy"
-            if not testing:
-                np.save(fname, np.array(scores))
-
-            if include_evals:
-
-                # wait for our evaluations to finish before we start the next evaluation
-                for process in processes:
-                    process.join()
-
-                agent.disable_noise(agent.net)
-                net_state_dict = deepcopy({k: v.cpu() for k, v in agent.net.state_dict().items()})
-                network_creator = deepcopy(agent.network_creator_fn)
-
-                # Start evaluation in a separate process
-                eval_process = mp.Process(target=evaluate_agent,
-                                          args=(net_state_dict, network_creator, eval_envs, num_eval_episodes, agent_name, testing, game,
-                                                n_actions, device, current_eval, framestack, repeat_probs))
-                eval_process.start()
-                processes.append(eval_process)
-
-            current_eval += 1
-
-            next_eval += eval_every
-
-    # wait for our evaluations to finish before we quit the program
-    for process in processes:
-        process.join()
+    env.close()
 
     print("Evaluations finished, job completed successfully!")
 

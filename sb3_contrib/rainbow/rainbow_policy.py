@@ -40,9 +40,18 @@ class RainbowPolicy(BasePolicy):
         return self.q_net.qvals(obs)
 
     def _predict(self, obs, deterministic=True):
-        self.reset_noise()
+        if deterministic:
+            # evaluation protocol: greedy actions with noisy-net noise disabled
+            self.disable_noise()
+        else:
+            self.reset_noise()
         qvals = self.forward(obs)
         return qvals.argmax(dim=1)
+
+    def disable_noise(self):
+        for module in self.q_net.modules():
+            if isinstance(module, FactorizedNoisyLinear):
+                module.disable_noise()
 
     def reset_noise(self):
         for module in self.q_net.modules():

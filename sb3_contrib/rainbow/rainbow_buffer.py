@@ -83,24 +83,23 @@ class SumTree:
     def total(self):
         return self.sum_tree[0]
 
-
 # Extend ReplayBufferSamples for PER
 # Copy ReplayBufferSamples fields
 replay_buffer_samples_fields = list(ReplayBufferSamples.__annotations__.items())
-# Add Additional fields
+# Add PER-specific fields only
 replay_buffer_samples_fields.append(("idxs", np.ndarray | None))
 replay_buffer_samples_fields.append(("weights", torch.Tensor | None))
 # Construct new NamedTuple with all fields.
 PERReplayBufferSamples = NamedTuple(
     "PERReplayBufferSamples",
-    replay_buffer_samples_fields
+    replay_buffer_samples_fields,
 )
-# Preserve original defaults and add new ones
+# Preserve original defaults and add defaults for PER-specific fields
 base_defaults = ReplayBufferSamples.__new__.__defaults__ or ()
 PERReplayBufferSamples.__new__.__defaults__ = (
     *base_defaults,
-    None,
-    None
+    None,  # idxs
+    None,  # weights
 )
 
 
@@ -142,8 +141,8 @@ class PER(ReplayBuffer):
 
         self.alpha = alpha
         self.beta = beta
+        # per-add() annealing step; set by Rainbow._setup_learn once total_timesteps is known
         self.beta_increment = 0.0
-        self._per_beta_increment = 0.0
         self.eps = 1e-6  # small constant to stop 0 probability
         self.device = device
 
@@ -158,10 +157,15 @@ class PER(ReplayBuffer):
             self.state_mem = np.zeros((self.storage_size, 3, self.imagex, self.imagey), dtype=np.uint8)
         else:
             self.state_mem = np.zeros((self.storage_size, self.imagex, self.imagey), dtype=np.uint8)
-        self.action_mem = np.zeros(self.storage_size, dtype=np.int64)
-        self.reward_mem = np.zeros(self.storage_size, dtype=float)
-        self.done_mem = np.zeros(self.storage_size, dtype=bool)
-        self.trun_mem = np.zeros(self.storage_size, dtype=bool)
+        # One extra slot at index storage_size acts as a zero-reward sentinel for n-step padding.
+        # Ring indices wrap modulo storage_size, so this extra slot is never overwritten.
+        self.action_mem = np.zeros(self.storage_size + 1, dtype=np.int64)
+        self.reward_mem = np.zeros(self.storage_size + 1, dtype=float)
+        self.done_mem = np.zeros(self.storage_size + 1, dtype=bool)
+        self.trun_mem = np.zeros(self.storage_size + 1, dtype=bool)
+
+        self.pad_idx = self.storage_size
+        self.trun_mem[self.pad_idx] = True
 
         # everything here is stored as ints as they are just pointers to the actual memory
         # reward contains N values. The first value contains the action. The set of N contains the pointers for both
@@ -176,14 +180,6 @@ class PER(ReplayBuffer):
 
         self.overlap = self.framestack - self.n_step
 
-    @property
-    def per_beta_increment(self):
-        return self._per_beta_increment
-
-    @per_beta_increment.setter
-    def per_beta_increment(self, beta_increment):
-        self._per_beta_increment = beta_increment
-
     def add(self, obs, next_obs, action, reward, done, infos):
         batch_size = len(action)
 
@@ -192,13 +188,15 @@ class PER(ReplayBuffer):
             next_state = next_obs[i]
             act = action[i]
             rew = reward[i]
-            dn = done[i]
             trun = infos[i].get("TimeLimit.truncated", False)
+            # SB3 VecEnv done = terminated OR truncated; only true terminations
+            # should zero the bootstrap, so strip the truncation component here
+            dn = bool(done[i]) and not trun
             stream = i
 
             self.append(state, act, rew, next_state, dn, trun, stream, prio=True)
 
-        self.beta = min(self.beta + self._per_beta_increment, 1.0)
+        self.beta = min(self.beta + self.beta_increment, 1.0)
 
     def append(self, state, action, reward, n_state, done, trun, stream, prio=True):
 
@@ -254,7 +252,7 @@ class PER(ReplayBuffer):
 
             reward_array = self.reward_buffer[stream][:]
             while len(reward_array) < self.n_step:
-                reward_array.extend([0])
+                reward_array.append(self.pad_idx)
 
             # Add the experience
             try:
@@ -360,7 +358,12 @@ class PER(ReplayBuffer):
 
         # apply n_step cumulation to rewards and dones
         if self.n_step > 1:
-            rewards, dones = self.compute_discounted_rewards_batch(rewards, dones, truns)
+            rewards, dones, discounts = self.compute_discounted_rewards_batch(rewards, dones, truns)
+        else:
+            rewards = rewards.reshape(-1)
+            dones = dones.reshape(-1)
+            actions = actions.reshape(-1)
+            discounts = np.full(len(rewards), self.gamma)
 
         # Compute importance-sampling weights w
         weights = (self.capacity * probs) ** -self.beta
@@ -380,6 +383,7 @@ class PER(ReplayBuffer):
         rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
         dones = torch.tensor(dones, dtype=torch.bool, device=self.device)
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
+        discounts = torch.tensor(discounts, dtype=torch.float32, device=self.device)
 
         # return batch
         batch = PERReplayBufferSamples(
@@ -390,6 +394,7 @@ class PER(ReplayBuffer):
             rewards=rewards,
             idxs=tree_idxs,
             weights=weights,
+            discounts=discounts,
         )
 
         # batch.idxs = tree_idxs
@@ -411,6 +416,7 @@ class PER(ReplayBuffer):
         batch_size, n_step = rewards_batch.shape
         discounted_rewards = np.zeros(batch_size)
         cumulative_dones = np.zeros(batch_size, dtype=bool)
+        discounts = np.full(batch_size, self.gamma**n_step)
 
         for i in range(batch_size):
             cumulative_discount = 1
@@ -420,10 +426,13 @@ class PER(ReplayBuffer):
                     cumulative_dones[i] = True
                     break
                 elif truns_batch[i, j] == 1:
+                    # Truncated after j + 1 real steps: n_state is the final observation,
+                    # so bootstrap with gamma^(j + 1) rather than gamma^n.
+                    discounts[i] = cumulative_discount * self.gamma
                     break
                 cumulative_discount *= self.gamma
 
-        return discounted_rewards, cumulative_dones
+        return discounted_rewards, cumulative_dones, discounts
 
     def update_priorities(self, idxs, priorities):
         priorities = priorities + self.eps

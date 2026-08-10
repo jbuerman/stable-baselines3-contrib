@@ -1,3 +1,5 @@
+import platform
+
 import torch
 import torch as T
 import torch.nn.functional as F
@@ -6,6 +8,7 @@ from stable_baselines3.common.type_aliases import TrainFreq, TrainFrequencyUnit
 
 from sb3_contrib.rainbow.rainbow_buffer import PER
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear
+
 
 class Rainbow(OffPolicyAlgorithm):
     def __init__(
@@ -16,10 +19,10 @@ class Rainbow(OffPolicyAlgorithm):
         target_replace=2000,
         per_alpha=0.5,
         gamma=0.99,
-        max_mem_size=1048576,
+        max_mem_size=None,
         n=3,
         grad_clip=10,
-        spi=16,
+        replay_ratio=0.25,
         learning_rate=6.25e-5,
         buffer_size=1_000_000,
         learning_starts=20000,
@@ -30,10 +33,9 @@ class Rainbow(OffPolicyAlgorithm):
         imagey=84,
         init_setup_model=True,
         policy_kwargs=None,
-        **kwargs
+        compile_mode="max-autotune",
+        **kwargs,
     ):
-        train_freq = (spi, "step")
-        gradient_steps = spi
 
         policy_kwargs = policy_kwargs or {}
         if not "linear_size" in policy_kwargs:
@@ -47,14 +49,37 @@ class Rainbow(OffPolicyAlgorithm):
             learning_starts=learning_starts,
             batch_size=batch_size,
             gamma=gamma,
-            train_freq=train_freq,
-            gradient_steps=gradient_steps,
+            train_freq=(1, "step"),
+            gradient_steps=1,
             policy_kwargs=policy_kwargs,
-            support_multi_env = True,
+            support_multi_env=True,
             **kwargs,
         )
 
-        self.spi = spi
+        self.compile_mode = compile_mode
+
+        assert replay_ratio > 0, "replay_ratio must be positive"
+        self.replay_ratio = replay_ratio
+
+        grads_per_vec_step = replay_ratio * self.n_envs
+
+        if grads_per_vec_step >= 1:
+            self.train_freq = (1, "step")
+            self.gradient_steps = round(grads_per_vec_step)
+        else:
+            self.train_freq = (round(1 / grads_per_vec_step), "step")
+            self.gradient_steps = 1
+
+        effective = self.gradient_steps / (self.train_freq[0] * self.n_envs)
+
+        if abs(effective - replay_ratio) / replay_ratio > 0.01:
+            import warnings
+
+            warnings.warn(
+                f"replay_ratio={replay_ratio} is not achievable exactly with "
+                f"{self.n_envs} envs; using {effective:.4g} "
+                f"(train_freq={self.train_freq[0]} steps, gradient_steps={self.gradient_steps})"
+            )
         self.grad_steps = 0
         self.replace_target_cnt = target_replace
         self.Vmin = -10
@@ -65,7 +90,8 @@ class Rainbow(OffPolicyAlgorithm):
 
         self.rgb = rgb
 
-        self.max_mem_size = max_mem_size
+        # buffer_size is the standard SB3 name; max_mem_size kept as an explicit override
+        self.max_mem_size = max_mem_size if max_mem_size is not None else buffer_size
         self.per_alpha = per_alpha
         self.per_beta = 0.4
         self.framestack = framestack
@@ -73,17 +99,11 @@ class Rainbow(OffPolicyAlgorithm):
         self.imagey = imagey
 
         self.total_timesteps = total_timesteps
-        self._beta_initialized = False
 
         if init_setup_model:
             self._setup_model()
 
     def _setup_model(self):
-        super()._setup_model()
-
-        self.q_net = self.policy.q_net
-        self.q_net_target = self.policy.q_net_target
-
         self.per_buffer = PER(
             size=self.max_mem_size,
             device=self.device,
@@ -97,40 +117,39 @@ class Rainbow(OffPolicyAlgorithm):
             imagex=self.imagex,
             imagey=self.imagey,
         )
-
         self.replay_buffer = self.per_buffer
 
+        super()._setup_model()
+
+        self.q_net = self.policy.q_net
+        self.q_net_target = self.policy.q_net_target
+
+        if self.compile_mode is not None and self.device.type == "cuda" and platform.system() == "Linux":
+            self.q_net.forward = torch.compile(self.q_net.forward, mode=self.compile_mode)
+            self.q_net_target.forward = torch.compile(self.q_net_target.forward, mode=self.compile_mode)
+        elif self.compile_mode is not None:
+            print(f"torch.compile skipped (needs CUDA + Linux; got {self.device.type} + {platform.system()})")
+
     def _setup_learn(self, total_timesteps, *args, **kwargs):
-        self.priority_weight_increase = (
-            1 - self.per_beta
-        ) / total_timesteps
-        self.per_buffer.beta_increment = self.priority_weight_increase
+        effective_total = self.total_timesteps if self.total_timesteps is not None else total_timesteps
+        self.per_buffer.beta_increment = (1.0 - self.per_buffer.beta) * self.n_envs / effective_total
         return super()._setup_learn(total_timesteps, *args, **kwargs)
 
     def train(self, gradient_steps, batch_size):        
         for _ in range(gradient_steps):
             self._train_call()
 
-    def learn(self, total_timesteps, *args, **kwargs):
-        if not self._beta_initialized:
-            effective_total = (
-                self.total_timesteps
-                if self.total_timesteps is not None
-                else total_timesteps
-            )
-            beta_start = self.replay_buffer.beta
-            self.replay_buffer.per_beta_increment = (
-                    (1.0 - beta_start) / (effective_total * self.n_envs)
-            )
-            self._beta_initialized = True
-
-        return super().learn(total_timesteps, *args, **kwargs)
-
     @torch.no_grad()
     def reset_noise(self, net):
         for m in net.modules():
             if isinstance(m, FactorizedNoisyLinear):
                 m.reset_noise()
+
+    @torch.no_grad()
+    def disable_noise(self, net):
+        for m in net.modules():
+            if isinstance(m, FactorizedNoisyLinear):
+                m.disable_noise()
 
     def replace_target_network(self):
         self.q_net_target.load_state_dict(self.q_net.state_dict())
@@ -157,6 +176,7 @@ class Rainbow(OffPolicyAlgorithm):
         dones = batch.dones
         weights = batch.weights
         idxs = batch.idxs
+        discounts = batch.discounts
         device = self.q_net.device
 
         obs = obs.to(device)
@@ -165,6 +185,7 @@ class Rainbow(OffPolicyAlgorithm):
         next_obs = next_obs.to(device)
         dones = dones.to(device)
         weights = weights.to(device)
+        discounts = discounts.to(device)
 
         # use this code to check your states are correct if applying to a custom env
         # If you apply Rainbow to a custom env and don't check your states first, you are killing both
@@ -202,7 +223,13 @@ class Rainbow(OffPolicyAlgorithm):
             next_best_distr = next_best_distr_v.detach()
 
             proj_distr = distr_projection(
-                next_best_distr, rewards, dones, self.Vmin, self.Vmax, self.N_ATOMS, self.gamma**self.n
+                next_best_distr,
+                rewards,
+                dones,
+                self.Vmin,
+                self.Vmax,
+                self.N_ATOMS,
+                discounts,
             )
 
             proj_distr_v = proj_distr.to(self.q_net.device)
@@ -233,41 +260,56 @@ class Rainbow(OffPolicyAlgorithm):
 
 def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
     """
-    Perform distribution projection aka Catergorical Algorithm from the
-    "A Distributional Perspective on RL" paper
+    Perform distribution projection aka Categorical Algorithm from the
+    "A Distributional Perspective on RL" paper.
+
+    gamma may be a scalar or a per-sample (batch,) tensor of bootstrap discounts
+    (gamma^k for k-step windows cut short by truncation).
+
+    Fully vectorized: a Python loop over atoms launches hundreds of small CUDA
+    kernels per gradient step, which dominates training time on GPU.
     """
-    batch_size = len(rewards)
     device = next_distr.device
-    rewards = rewards.to(device)
-    dones = dones.to(device)
-    proj_distr = T.zeros((batch_size, n_atoms), dtype=T.float32, device=device)
+    batch_size = len(rewards)
+
+    rewards = rewards.to(device).float()
+    dones = dones.to(device).bool()
+
+    if not torch.is_tensor(gamma):
+        gamma = torch.full((batch_size,), float(gamma), device=device)
+    else:
+        gamma = gamma.to(device).float()
+
     delta_z = (Vmax - Vmin) / (n_atoms - 1)
-    for atom in range(n_atoms):
-        tz_j = T.clamp(rewards + (Vmin + atom * delta_z) * gamma, Vmin, Vmax).to(device)
-        b_j = ((tz_j - Vmin) / delta_z).to(device)
-        l = T.floor(b_j).long()
-        u = T.ceil(b_j).long()
-        eq_mask = u == l
-        proj_distr[eq_mask, l[eq_mask]] += next_distr[eq_mask, atom]
-        ne_mask = u != l
-        proj_distr[ne_mask, l[ne_mask]] += next_distr[ne_mask, atom] * (u - b_j)[ne_mask]
-        proj_distr[ne_mask, u[ne_mask]] += next_distr[ne_mask, atom] * (b_j - l)[ne_mask]
-    if dones.any():
-        dones = dones.bool()
-        proj_distr[dones] = 0.0
-        tz_j = T.clamp(rewards[dones], Vmin, Vmax)
-        b_j = (tz_j - Vmin) / delta_z
-        l = T.floor(b_j).type(T.int64)
-        u = T.ceil(b_j).type(T.int64)
-        eq_mask = u == l
-        eq_dones = T.clone(dones)
-        eq_dones[dones] = eq_mask
-        if eq_dones.any():
-            proj_distr[eq_dones, l[eq_mask]] = 1.0
-        ne_mask = u != l
-        ne_dones = T.clone(dones)
-        ne_dones[dones] = ne_mask
-        if ne_dones.any():
-            proj_distr[ne_dones, l[ne_mask]] = (u - b_j)[ne_mask]
-            proj_distr[ne_dones, u[ne_mask]] = (b_j - l)[ne_mask]
+    support = torch.linspace(Vmin, Vmax, n_atoms, device=device)
+
+    # Tz = r + gamma^k * z; terminal transitions have no bootstrap term,
+    # so their whole distribution collapses onto the clamped reward.
+    tz = rewards.unsqueeze(1) + gamma.unsqueeze(1) * support.unsqueeze(0)
+    tz[dones] = rewards[dones].unsqueeze(1)
+    tz = tz.clamp(Vmin, Vmax)
+
+    b = (tz - Vmin) / delta_z
+    l = b.floor().long()
+    u = b.ceil().long()
+
+    # When b lands exactly on an atom, shift the pair so interpolation weights
+    # still sum to 1 and no probability mass is dropped.
+    l[(u > 0) & (l == u)] -= 1
+    u[(l < (n_atoms - 1)) & (l == u)] += 1
+
+    proj_distr = T.zeros((batch_size, n_atoms), dtype=T.float32, device=device)
+    offset = (torch.arange(batch_size, device=device) * n_atoms).unsqueeze(1)
+
+    proj_distr.view(-1).index_add_(
+        0,
+        (l + offset).view(-1),
+        (next_distr * (u.float() - b)).view(-1),
+    )
+    proj_distr.view(-1).index_add_(
+        0,
+        (u + offset).view(-1),
+        (next_distr * (b - l.float())).view(-1),
+    )
+
     return proj_distr
