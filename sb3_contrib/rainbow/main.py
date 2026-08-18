@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import logging
 import multiprocessing as mp
 import os
@@ -18,6 +19,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from sb3_contrib.rainbow.rainbow import Rainbow
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
 
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,7 @@ def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=
     clipped rewards. Evaluation envs disable clipping so scores read directly
     from step() are raw.
     """
+    logger.debug("Creating environments.")
     def make_single_env():
         env = gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs)
         env = gym.wrappers.AtariPreprocessing(env, terminal_on_life_loss=terminal_on_life_loss)
@@ -48,7 +51,9 @@ def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=
         env = gym.wrappers.FrameStackObservation(env, framestack)
         return env
 
-    return SubprocVecEnv([make_single_env for _ in range(envs_create)])
+    all_envs = SubprocVecEnv([make_single_env for _ in range(envs_create)])
+    logger.debug("Environments created.")
+    return all_envs
 
 
 def create_network(framestack, n_actions, device, linear_size):
@@ -103,6 +108,7 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
         if isinstance(m, FactorizedNoisyLinear):
             m.disable_noise()
 
+    logger.debug(f"Evaluating for {num_eval_episodes} episodes.")
     while eval_episodes < num_eval_episodes:
 
         eval_action = choose_eval_action(eval_observation, eval_net, device)
