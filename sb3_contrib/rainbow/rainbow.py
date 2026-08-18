@@ -164,7 +164,7 @@ class Rainbow(OffPolicyAlgorithm):
             f"train_call start: "
             f"timesteps={self.num_timesteps} "
             f"grad_steps={self.grad_steps} "
-            f"buffer_size={self.replay_buffer.size()}"
+            f"buffer_size={self.replay_buffer.size}"
         )
 
         if self.num_timesteps < self.learning_starts:
