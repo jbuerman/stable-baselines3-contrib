@@ -1,4 +1,5 @@
 import argparse
+import logging
 import multiprocessing as mp
 import os
 import time
@@ -16,6 +17,8 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from sb3_contrib.rainbow.rainbow import Rainbow
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
+
+logger = logging.getLogger(__name__)
 
 
 def choose_eval_action(observation, eval_net, device):
@@ -171,6 +174,7 @@ class RainbowLoopCallback(BaseCallback):
         self.linear_size = linear_size
         self.total_steps = total_steps
         self.print_every = print_every
+        self.next_eval = eval_every
 
         self.scores = []
         self.scores_temp = []
@@ -195,7 +199,7 @@ class RainbowLoopCallback(BaseCallback):
             now = time.time()
             fps = (self.num_timesteps - self.last_steps) / (now - self.last_time)
 
-            print(
+            logger.info(
                 "{} {} avg score {:.2f} total_steps {:.0f} fps {:.2f} games {}".format(
                     self.agent_name,
                     self.game,
@@ -204,7 +208,6 @@ class RainbowLoopCallback(BaseCallback):
                     fps,
                     self.episodes,
                 ),
-                flush=True,
             )
 
             self.last_steps = self.num_timesteps
@@ -218,7 +221,7 @@ class RainbowLoopCallback(BaseCallback):
         return True
 
     def _run_eval(self):
-        print("Evaluating")
+        logger.info("Evaluating")
         self.last_eval_step = self.num_timesteps
 
         if not self.testing and (self.current_eval + 1) in (1, 10, 50, 100, 150, 200):
@@ -227,15 +230,21 @@ class RainbowLoopCallback(BaseCallback):
             )
 
         if not self.testing:
-            np.save(self.agent_name + "Experiment.npy", np.array(self.scores))
+            np.save(f"{self.agent_name}_Experiment.npy", np.array(self.scores))
 
         if self.include_evals:
+            logger.debug(f"Joining {len(self.processes)} previous eval processes")
             for process in self.processes:
+                logger.debug(f"Waiting for PID {process.pid}")
                 process.join()
+                logger.debug(f"PID {process.pid} completed")
             self.processes = []
+            logger.debug("All joins completed")
 
             self.model.disable_noise(self.model.q_net)
+            logger.debug("Copying model to CPU")
             net_state_dict = deepcopy({k: v.cpu() for k, v in self.model.q_net.state_dict().items()})
+            logger.debug("CPU copy complete")
             network_creator = partial(
                 create_network,
                 self.framestack,
@@ -271,7 +280,7 @@ class RainbowLoopCallback(BaseCallback):
             self._run_eval()
 
         if not self.testing:
-            np.save(self.agent_name + "Experiment.npy", np.array(self.scores))
+            np.save(f"{self.agent_name}_Experiment.npy", np.array(self.scores))
 
         for process in self.processes:
             process.join()
@@ -354,7 +363,7 @@ def main():
     if len(formatted_string) > 2:
         agent_name += '_' + formatted_string
 
-    print("Agent Name:" + str(agent_name))
+    logger.info(f"Agent Name: {agent_name}")
     testing = args.testing
 
     # creates new directory for results and models
@@ -369,7 +378,7 @@ def main():
                 break
             counter += 1
         os.mkdir(new_dir_name)
-        print(f"Created directory: {new_dir_name}")
+        logger.info(f"Created directory: {new_dir_name}")
         os.chdir(new_dir_name)
 
     if testing:
@@ -389,20 +398,20 @@ def main():
 
     # create blank evaluation file — size off the actual eval cadence so we never overflow.
     # +2 covers the end-of-training eval and rounding from num_envs overshooting next_eval.
-    fname = agent_name + "Evaluation.npy"
+    fname = f"{agent_name}_Evaluation.npy"
     if not testing:
         num_eval_slots = n_steps // eval_every + 2
         np.save(fname, np.zeros((num_eval_slots, num_eval_episodes)))
 
-    print("Currently Playing Game: " + str(game))
+    logger.info("Currently Playing Game: " + str(game))
 
     gpu = "0"
     device = torch.device('cuda:' + gpu if torch.cuda.is_available() else 'cpu')
-    print("Device: " + str(device))
+    logger.info("Device: " + str(device))
 
     env = make_env(num_envs, game, framestack, repeat_probs)
-    print(f"Observation Space: {env.observation_space}")
-    print(f"Action Space: {env.action_space}")
+    logger.info(f"Observation Space: {env.observation_space}")
+    logger.info(f"Action Space: {env.action_space}")
     if hasattr(env.action_space, "n"):
         n_actions = env.action_space.n
     else:
@@ -449,7 +458,7 @@ def main():
 
     env.close()
 
-    print("Evaluations finished, job completed successfully!")
+    logger.info("Evaluations finished, job completed successfully!")
 
 
 if __name__ == '__main__':

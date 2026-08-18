@@ -1,13 +1,15 @@
+import logging
 import platform
 
 import torch
 import torch as T
 import torch.nn.functional as F
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.type_aliases import TrainFreq, TrainFrequencyUnit
 
 from sb3_contrib.rainbow.rainbow_buffer import PER
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear
+
+logger = logging.getLogger(__name__)
 
 
 class Rainbow(OffPolicyAlgorithm):
@@ -128,7 +130,7 @@ class Rainbow(OffPolicyAlgorithm):
             self.q_net.forward = torch.compile(self.q_net.forward, mode=self.compile_mode)
             self.q_net_target.forward = torch.compile(self.q_net_target.forward, mode=self.compile_mode)
         elif self.compile_mode is not None:
-            print(f"torch.compile skipped (needs CUDA + Linux; got {self.device.type} + {platform.system()})")
+            logger.info(f"torch.compile skipped (needs CUDA + Linux; got {self.device.type} + {platform.system()})")
 
     def _setup_learn(self, total_timesteps, *args, **kwargs):
         effective_total = self.total_timesteps if self.total_timesteps is not None else total_timesteps
@@ -158,7 +160,15 @@ class Rainbow(OffPolicyAlgorithm):
         return self.replay_buffer.sample(self.batch_size)
 
     def _train_call(self):
+        logger.debug(
+            f"train_call start: "
+            f"timesteps={self.num_timesteps} "
+            f"grad_steps={self.grad_steps} "
+            f"buffer_size={self.replay_buffer.size()}"
+        )
+
         if self.num_timesteps < self.learning_starts:
+            logger.debug("Skipping training: learning_starts not reached")
             return
 
         # NoisyNet: resample noise on both networks per gradient step
@@ -168,7 +178,9 @@ class Rainbow(OffPolicyAlgorithm):
         if self.grad_steps % self.replace_target_cnt == 0:
             self.replace_target_network()
 
+        logger.debug("Sampling replay buffer")
         batch = self._sample_buffer()
+        logger.debug("Replay buffer sample completed")
         obs = batch.observations
         actions = batch.actions
         rewards = batch.rewards
@@ -244,6 +256,9 @@ class Rainbow(OffPolicyAlgorithm):
         weights = weights.squeeze().to(self.q_net.device)
         loss = (weights * kl_per_sample).mean()
         self.last_loss = loss.item()
+        self.logger.record("train/loss", loss.item())
+        self.logger.record("train/beta", self.replay_buffer.beta)
+        self.logger.record("train/grad_steps", self.grad_steps)
 
         loss.backward()
 
@@ -253,9 +268,9 @@ class Rainbow(OffPolicyAlgorithm):
 
         self.grad_steps += 1
         if self.grad_steps % 10000 == 0:
-            print("Completed " + str(self.grad_steps) + " gradient steps")
+            logger.info(f"Completed {self.grad_steps} gradient steps")
         if self.grad_steps % 10000 == 0:
-            print(f"Beta: {self.replay_buffer.beta}")
+            logger.info(f"Beta: {self.replay_buffer.beta}")
 
 
 def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
