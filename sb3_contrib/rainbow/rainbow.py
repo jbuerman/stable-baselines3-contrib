@@ -1,5 +1,6 @@
 import logging
 import platform
+import time
 
 import torch
 import torch as T
@@ -160,12 +161,13 @@ class Rainbow(OffPolicyAlgorithm):
         return self.replay_buffer.sample(self.batch_size)
 
     def _train_call(self):
-        logger.debug(
-            f"train_call start: "
-            f"timesteps={self.num_timesteps} "
-            f"grad_steps={self.grad_steps} "
-            f"buffer_size={self.replay_buffer.size()}"
-        )
+        if self.grad_steps % 10000 == 0:
+            logger.debug(
+                f"train_call start: "
+                f"timesteps={self.num_timesteps} "
+                f"grad_steps={self.grad_steps} "
+                f"buffer_size={self.replay_buffer.size}"
+            )
 
         if self.num_timesteps < self.learning_starts:
             logger.debug("Skipping training: learning_starts not reached")
@@ -178,9 +180,13 @@ class Rainbow(OffPolicyAlgorithm):
         if self.grad_steps % self.replace_target_cnt == 0:
             self.replace_target_network()
 
-        logger.debug("Sampling replay buffer")
+        if self.grad_steps % 10000 == 0:
+            t0 = time.perf_counter()
+            logger.debug("Sampling replay buffer")
         batch = self._sample_buffer()
-        logger.debug("Replay buffer sample completed")
+        if self.grad_steps % 10000 == 0:
+            t1 = time.perf_counter()
+            logger.debug(f"Replay buffer sample completed in {round(t1 - t0, 3)}")
         obs = batch.observations
         actions = batch.actions
         rewards = batch.rewards
