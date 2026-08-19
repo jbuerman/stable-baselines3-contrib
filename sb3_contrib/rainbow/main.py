@@ -126,13 +126,14 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
         eval_observation = eval_observation_
 
     if not testing:
-        fname = agent_name + "Evaluation.npy"
+        fname = f"{agent_name}_Evaluation.npy"
+        logger.debug(f"Loading {fname}")
         data = np.load(fname)
 
         # Update the specified index in the 0th dimension
         data[index] = evals
-        print("Evaluation " + str(index + 1) + "M Complete, average score:")
-        print(np.mean(evals))
+        logger.info(f"Evaluation {index + 1} M Complete, average score:")
+        logger.info(f"{np.mean(evals)}")
 
         # Save the updated array back to the file
         np.save(fname, data)
@@ -227,7 +228,7 @@ class RainbowLoopCallback(BaseCallback):
         return True
 
     def _run_eval(self):
-        logger.info("Evaluating")
+        logger.info(f"Evaluating: {self.current_eval}. (Testing: {self.testing})")
         self.last_eval_step = self.num_timesteps
 
         if not self.testing and (self.current_eval + 1) in (1, 10, 50, 100, 150, 200):
@@ -332,8 +333,9 @@ def main():
     args = parser.parse_args()
 
     arg_string = non_default_args(args, parser)
+    logger.debug(f"Args: {args}")
     formatted_string = format_arguments(arg_string)
-    print(formatted_string)
+    logger.info(f"Formatted args: {formatted_string}")
 
     compile_mode = "max-autotune" if args.compile else None
 
