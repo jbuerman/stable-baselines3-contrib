@@ -1,14 +1,15 @@
+import logging
 import math
 from math import sqrt
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from stable_baselines3.common.policies import BasePolicy
 from torch import Tensor, nn, optim
 from torch.nn import init as torch_init
 
-
-from stable_baselines3.common.policies import BasePolicy
+logger = logging.getLogger(__name__)
 
 
 class RainbowPolicy(BasePolicy):
@@ -217,9 +218,9 @@ class NatureC51(nn.Module):
         return self.softmax(t.view(-1, self.atoms)).view(t.size())
 
     def save_checkpoint(self, name):
-        #print('... saving checkpoint ...')
+        logger.debug(f"Saving checkpoint {name}")
         torch.save(self.state_dict(), name + ".model")
 
     def load_checkpoint(self, name):
-        #print('... loading checkpoint ...')
+        logger.debug(f"Loading checkpoint {name}")
         self.load_state_dict(torch.load(name))
