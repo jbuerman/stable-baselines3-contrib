@@ -1,0 +1,52 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    sb3_contrib /app/sb3_contrib
+    setup.py /app/setup.py
+    README.md /app/README.md
+
+%post
+    apt-get update && apt-get install -y \
+        git \
+        curl \
+        build-essential \
+        python3-dev \
+        gcc \
+        g++ \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libxcb1
+
+    python -m pip install --upgrade pip setuptools wheel
+
+    # PyTorch (CUDA will come from Apptainer --nv on the HPC)
+    pip install torch torchvision torchaudio
+
+    # Atari dependencies
+    pip install \
+        "gymnasium[atari,other]" \
+        ale-py \
+        autorom
+
+    # install ROMs
+    AutoROM --accept-license
+
+    # Install SB3-Contrib
+    cd /app
+    pip install -e .
+
+    # sanity checks
+    python -c "import torch"
+    python -c "import cv2"
+    python -c "import stable_baselines3"
+    python -c "import sb3_contrib"
+
+%environment
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    exec python -m sb3_contrib.rainbow.main "$@"
