@@ -6,6 +6,7 @@ import os
 import time
 from copy import deepcopy
 from functools import partial
+import sys
 
 import ale_py
 import gymnasium as gym
@@ -21,6 +22,15 @@ from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51,
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+logger.propagate = False
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(module)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+logger.addHandler(console_handler)
 
 
 def choose_eval_action(observation, eval_net, device):
@@ -97,12 +107,17 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
     eval_scores = np.array([0 for i in range(eval_envs)])
     eval_observation = eval_env.reset()
 
+    logger.debug(f"Creating evaluation network on {device}")
     eval_net = network_creator()
+    logger.debug("Evaluation network created")
 
     # move state dict to gpu - pytorch doesn't allow sharing across threads on gpu
+    logger.debug("Moving evaluation state dict to device")
     state_dict_gpu = {k: v.to(device) for k, v in net_state_dict.items()}
+    logger.debug("Evaluation state dict moved to device")
 
     eval_net.load_state_dict(state_dict_gpu)
+    logger.debug("Evaluation state dict loaded")
 
     for m in eval_net.modules():
         if isinstance(m, FactorizedNoisyLinear):
