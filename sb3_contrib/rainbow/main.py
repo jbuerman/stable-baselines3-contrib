@@ -82,7 +82,7 @@ def format_arguments(arg_string):
 
 def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes, agent_name, testing, game,
                    n_actions, device, index, framestack, repeat_probs):
-
+    logger.debug(f"Evaluation {index + 1} M for {num_eval_episodes} episodes.")
     # paper evaluates on full episodes (life loss is NOT terminal during eval)
     eval_env = make_env(
         eval_envs,
@@ -108,8 +108,12 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
         if isinstance(m, FactorizedNoisyLinear):
             m.disable_noise()
 
-    logger.debug(f"Evaluating for {num_eval_episodes} episodes.")
+    progress = 0
     while eval_episodes < num_eval_episodes:
+        percentage_progress = eval_episodes / num_eval_episodes * 100
+        if percentage_progress > progress + 5:
+            logger.debug(f"Evaluation progress {round(percentage_progress, 1)}%.")
+            progress = 5 * round(percentage_progress / 5)
 
         eval_action = choose_eval_action(eval_observation, eval_net, device)
         eval_observation_, eval_reward, eval_done_, eval_info = eval_env.step(eval_action)
@@ -132,8 +136,7 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
 
         # Update the specified index in the 0th dimension
         data[index] = evals
-        logger.info(f"Evaluation {index + 1} M Complete, average score:")
-        logger.info(f"{np.mean(evals)}")
+        logger.info(f"Evaluation {index + 1} M Complete, average score: {np.mean(evals)}")
 
         # Save the updated array back to the file
         np.save(fname, data)
@@ -244,7 +247,7 @@ class RainbowLoopCallback(BaseCallback):
             for process in self.processes:
                 logger.debug(f"Waiting for PID {process.pid}")
                 process.join()
-                logger.debug(f"PID {process.pid} completed")
+                logger.debug(f"PID {process.pid} completed with exit code {process.exitcode}")
             self.processes = []
             logger.debug("All joins completed")
 
@@ -404,7 +407,7 @@ def main():
         num_envs = envs
         eval_envs = args.eval_envs
         n_steps = total_steps
-        eval_every = 200000
+        eval_every = 20000
     next_eval = eval_every
 
     # create blank evaluation file — size off the actual eval cadence so we never overflow.

@@ -182,11 +182,12 @@ class Rainbow(OffPolicyAlgorithm):
 
         if self.grad_steps % 10000 == 0:
             t0 = time.perf_counter()
-            logger.debug("Sampling replay buffer")
+            logger.debug(f"Sporadic sampling replay buffer at grad step {self.grad_steps}")
         batch = self._sample_buffer()
         if self.grad_steps % 10000 == 0:
             t1 = time.perf_counter()
-            logger.debug(f"Replay buffer sample completed in {round(t1 - t0, 3)}")
+            logger.debug(f"Sporadic replay buffer sample at grad step {self.grad_steps}"
+                         f" completed in {round(t1 - t0, 3)}")
         obs = batch.observations
         actions = batch.actions
         rewards = batch.rewards
