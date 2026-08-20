@@ -260,6 +260,7 @@ class RainbowLoopCallback(BaseCallback):
                 self.linear_size,
             )
 
+            logger.debug("Creating evaluation process.")
             eval_process = mp.Process(
                 target=evaluate_agent,
                 args=(
@@ -277,7 +278,9 @@ class RainbowLoopCallback(BaseCallback):
                     self.repeat_probs,
                 ),
             )
+            logger.debug("Starting evaluation process.")
             eval_process.start()
+            logger.info("Evaluation process started.")
             self.processes.append(eval_process)
 
         self.current_eval += 1
