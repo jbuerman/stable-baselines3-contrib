@@ -9,6 +9,7 @@ from functools import partial
 import sys
 
 import ale_py
+from tqdm import tqdm
 import gymnasium as gym
 import numpy as np
 import torch
@@ -20,9 +21,9 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from sb3_contrib.rainbow.rainbow import Rainbow
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-logger.propagate = False
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+root_logger.handlers.clear()
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(
     logging.Formatter(
@@ -30,7 +31,8 @@ console_handler.setFormatter(
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 )
-logger.addHandler(console_handler)
+root_logger.addHandler(console_handler)
+logger = logging.getLogger(__name__)
 
 
 def choose_eval_action(observation, eval_net, device):
@@ -92,7 +94,7 @@ def format_arguments(arg_string):
 
 def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes, agent_name, testing, game,
                    n_actions, device, index, framestack, repeat_probs):
-    logger.debug(f"Evaluation {index + 1} M for {num_eval_episodes} episodes.")
+    logger.debug(f"Evaluation {index + 1} M for {num_eval_episodes} episodes and {eval_envs} environments.")
     # paper evaluates on full episodes (life loss is NOT terminal during eval)
     eval_env = make_env(
         eval_envs,
@@ -119,10 +121,12 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
     eval_net.load_state_dict(state_dict_gpu)
     logger.debug("Evaluation state dict loaded")
 
+    logger.debug(f"Disabling noise.")
     for m in eval_net.modules():
         if isinstance(m, FactorizedNoisyLinear):
             m.disable_noise()
 
+    logger.debug("Starting Evaluation episodes.")
     progress = 0
     while eval_episodes < num_eval_episodes:
         percentage_progress = eval_episodes / num_eval_episodes * 100
@@ -155,6 +159,7 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
 
         # Save the updated array back to the file
         np.save(fname, data)
+    logger.debug(f"Closing Evaluation {index + 1} M.")
     eval_env.close()
 
 
@@ -422,7 +427,7 @@ def main():
         num_envs = envs
         eval_envs = args.eval_envs
         n_steps = total_steps
-        eval_every = 20000
+        eval_every = 200000
     next_eval = eval_every
 
     # create blank evaluation file — size off the actual eval cadence so we never overflow.
