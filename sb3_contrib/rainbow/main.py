@@ -427,7 +427,7 @@ def main():
         num_envs = envs
         eval_envs = args.eval_envs
         n_steps = total_steps
-        eval_every = 20000
+        eval_every = 200000
     next_eval = eval_every
 
     # create blank evaluation file — size off the actual eval cadence so we never overflow.
