@@ -1,5 +1,4 @@
 import argparse
-import contextlib
 import logging
 import multiprocessing as mp
 import os
@@ -8,16 +7,11 @@ from copy import deepcopy
 from functools import partial
 import sys
 
-import ale_py
-from tqdm import tqdm
-import gymnasium as gym
 import numpy as np
 import torch
-from stable_baselines3.common.atari_wrappers import ClipRewardEnv
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import SubprocVecEnv
 
+from sb3_contrib.rainbow.envpool_env import make_atari_envpool
 from sb3_contrib.rainbow.rainbow import Rainbow
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
 
@@ -34,6 +28,24 @@ console_handler.setFormatter(
 root_logger.addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
+# EnvPool is seeded at construction time only, so --repeat (which exists to
+# rerun an experiment under a different seed) has to be turned into an actual
+# seed here; unseeded gymnasium envs used to make that happen implicitly.
+# Training and evaluation get disjoint ranges so evaluation never replays the
+# training envs' episodes, and each repeat gets a block wide enough for every
+# env of every evaluation round.
+SEED_STRIDE = 10_000_000
+TRAIN_SEED_BASE = 0
+EVAL_SEED_BASE = 1_000_000
+
+
+def train_seed(repeat):
+    return TRAIN_SEED_BASE + repeat * SEED_STRIDE
+
+
+def eval_seed(repeat, index, eval_envs):
+    return EVAL_SEED_BASE + repeat * SEED_STRIDE + index * eval_envs
+
 
 def choose_eval_action(observation, eval_net, device):
     # evaluation protocol: greedy actions, noisy-net noise disabled
@@ -45,27 +57,27 @@ def choose_eval_action(observation, eval_net, device):
     return action
 
 
-def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True, clip_rewards=True):
-    """Build the vectorized Atari env.
+def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True, clip_rewards=True,
+             seed=42):
+    """Build the vectorized Atari env on top of EnvPool.
 
-    Wrapper order matters: Monitor sits below ClipRewardEnv so logged episode
-    returns info["episode"]["r"] are raw game scores, while the agent trains on
+    EnvPool applies the whole Atari preprocessing chain (grayscale, 84x84,
+    frame skip, frame stack, noop/fire reset, optional life-loss termination
+    and reward clipping) inside its own C++ thread pool, so no per-env
+    gymnasium wrappers and no worker subprocesses are needed. Raw game scores
+    are still reported through info["episode"]["r"] while the agent trains on
     clipped rewards. Evaluation envs disable clipping so scores read directly
     from step() are raw.
     """
-    logger.debug("Creating environments.")
-    def make_single_env():
-        env = gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs)
-        env = gym.wrappers.AtariPreprocessing(env, terminal_on_life_loss=terminal_on_life_loss)
-        env = Monitor(env)
-        if clip_rewards:
-            env = ClipRewardEnv(env)
-        env = gym.wrappers.FrameStackObservation(env, framestack)
-        return env
-
-    all_envs = SubprocVecEnv([make_single_env for _ in range(envs_create)])
-    logger.debug("Environments created.")
-    return all_envs
+    return make_atari_envpool(
+        envs_create,
+        game,
+        framestack=framestack,
+        repeat_probs=repeat_probs,
+        terminal_on_life_loss=terminal_on_life_loss,
+        clip_rewards=clip_rewards,
+        seed=seed,
+    )
 
 
 def create_network(framestack, n_actions, device, linear_size):
@@ -93,9 +105,12 @@ def format_arguments(arg_string):
 
 
 def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes, agent_name, testing, game,
-                   n_actions, device, index, framestack, repeat_probs):
+                   n_actions, device, index, framestack, repeat_probs, repeat):
     logger.debug(f"Evaluation {index + 1} M for {num_eval_episodes} episodes and {eval_envs} environments.")
     # paper evaluates on full episodes (life loss is NOT terminal during eval)
+    # EnvPool seeds once at construction, so derive a fresh, non-overlapping
+    # seed block per evaluation round - otherwise every round would replay the
+    # exact same episodes.
     eval_env = make_env(
         eval_envs,
         game,
@@ -103,10 +118,11 @@ def evaluate_agent(net_state_dict, network_creator, eval_envs, num_eval_episodes
         repeat_probs,
         terminal_on_life_loss=False,
         clip_rewards=False,
+        seed=eval_seed(repeat, index, eval_envs),
     )
     evals = []
     eval_episodes = 0
-    eval_scores = np.array([0 for i in range(eval_envs)])
+    eval_scores = np.zeros(eval_envs, dtype=np.float64)
     eval_observation = eval_env.reset()
 
     logger.debug(f"Creating evaluation network on {device}")
@@ -167,9 +183,9 @@ class RainbowLoopCallback(BaseCallback):
     """Replaces the old hand-rolled training loop.
 
     The env must only be stepped by SB3's learn(). This callback reproduces
-    the old loop's responsibilities: raw-score tracking via Monitor,
-    progress printing, periodic evaluation in a background process and
-    model checkpoints.
+    the old loop's responsibilities: raw-score tracking via the EnvPool
+    adapter's info["episode"], progress printing, periodic evaluation in a
+    background process and model checkpoints.
     """
 
     def __init__(
@@ -183,6 +199,7 @@ class RainbowLoopCallback(BaseCallback):
         num_eval_episodes,
         framestack,
         repeat_probs,
+        repeat,
         n_actions,
         device,
         linear_size,
@@ -199,6 +216,7 @@ class RainbowLoopCallback(BaseCallback):
         self.num_eval_episodes = num_eval_episodes
         self.framestack = framestack
         self.repeat_probs = repeat_probs
+        self.repeat = repeat
         self.n_actions = n_actions
         self.eval_device = device
         self.linear_size = linear_size
@@ -299,6 +317,7 @@ class RainbowLoopCallback(BaseCallback):
                     self.current_eval,
                     self.framestack,
                     self.repeat_probs,
+                    self.repeat,
                 ),
             )
             logger.debug("Starting evaluation process.")
@@ -443,7 +462,7 @@ def main():
     device = torch.device('cuda:' + gpu if torch.cuda.is_available() else 'cpu')
     logger.info("Device: " + str(device))
 
-    env = make_env(num_envs, game, framestack, repeat_probs)
+    env = make_env(num_envs, game, framestack, repeat_probs, seed=train_seed(args.repeat))
     logger.info(f"Observation Space: {env.observation_space}")
     logger.info(f"Action Space: {env.action_space}")
     if hasattr(env.action_space, "n"):
@@ -481,6 +500,7 @@ def main():
         num_eval_episodes=num_eval_episodes,
         framestack=framestack,
         repeat_probs=repeat_probs,
+        repeat=args.repeat,
         n_actions=n_actions,
         device=device,
         linear_size=linear_size,
