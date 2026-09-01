@@ -2,13 +2,15 @@ import argparse
 import logging
 import multiprocessing as mp
 import os
+import platform
+import sys
 import time
 from copy import deepcopy
 from functools import partial
-import sys
 
 import numpy as np
 import torch
+import triton
 from stable_baselines3.common.callbacks import BaseCallback
 
 from sb3_contrib.rainbow.envpool_env import make_atari_envpool
@@ -381,6 +383,13 @@ def main():
     logger.debug(f"Args: {args}")
     formatted_string = format_arguments(arg_string)
     logger.info(f"Formatted args: {formatted_string}")
+
+    logger.info(f"Run environment: \n"
+                f"Python: {platform.python_version()}\n"
+                f"PyTorch: {torch.__version__}\n"
+                f"Triton: {triton.__version__}\n"
+                f"CUDA build: {torch.version.cuda}\n"
+                f"GPU: {torch.cuda.get_device_name(0)}.")
 
     compile_mode = "max-autotune" if args.compile else None
 
