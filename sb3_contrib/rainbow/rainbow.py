@@ -1,46 +1,93 @@
+"""
+Rainbow DQN.
+"""
+
 import logging
 import platform
+from typing import Any
 
 import torch
-import torch as T
-import torch.nn.functional as F
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
+from stable_baselines3.common.policies import BasePolicy
+from stable_baselines3.common.type_aliases import GymEnv, Schedule
+from torch import Tensor
+from torch.nn import functional
 
-from sb3_contrib.rainbow.rainbow_buffer import PER
+from sb3_contrib.rainbow.rainbow_buffer import PER, PERReplayBufferSamples
 from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear
 
 logger = logging.getLogger(__name__)
 
 
 class Rainbow(OffPolicyAlgorithm):
+    """
+    Rainbow DQN.
+
+    This implementation combines the main Rainbow DQN extensions, including
+    distributional Q-learning, Double DQN, dueling networks, noisy networks,
+    prioritized experience replay and multi-step returns.
+    """
+
     def __init__(
         self,
-        policy,
-        env,
-        total_timesteps=None,
-        target_replace=2000,
-        per_alpha=0.5,
-        gamma=0.99,
-        max_mem_size=None,
-        n=3,
-        grad_clip=10,
-        replay_ratio=0.25,
-        learning_rate=6.25e-5,
-        buffer_size=1_000_000,
-        learning_starts=20000,
-        batch_size=32,
-        rgb=False,
-        framestack=4,
-        imagex=84,
-        imagey=84,
-        init_setup_model=True,
-        policy_kwargs=None,
-        compile_mode="max-autotune",
-        **kwargs,
-    ):
+        policy: str | type[BasePolicy],
+        env: GymEnv | str,
+        total_timesteps: int | None = None,
+        target_replace: int = 2000,
+        per_alpha: float = 0.5,
+        gamma: float = 0.99,
+        max_mem_size: int | None = None,
+        n: int = 3,
+        grad_clip: float = 10,
+        replay_ratio: float = 0.25,
+        learning_rate: float | Schedule = 6.25e-5,
+        buffer_size: int = 1_000_000,
+        learning_starts: int = 20_000,
+        batch_size: int = 32,
+        rgb: bool = False,
+        framestack: int = 4,
+        imagex: int = 84,
+        imagey: int = 84,
+        init_setup_model: bool = True,
+        policy_kwargs: dict[str, Any] | None = None,
+        compile_mode: str | None = "max-autotune",
+        **kwargs: Any,
+    ) -> None:
+        """
+        :param policy: The policy model to use.
+        :param env: The environment to learn from.
+        :param total_timesteps: Total number of environment transitions used to
+        schedule PER beta annealing. If ``None``, the value passed to
+        ``learn()`` is used.
+        :param target_replace: Number of gradient steps between target network
+        updates.
+        :param per_alpha: Priority exponent used by prioritized experience replay.
+        :param gamma: Discount factor.
+        :param max_mem_size: Explicit override for the replay buffer capacity.
+        If ``None``, ``buffer_size`` is used.
+        :param n: Number of steps used for multi-step returns.
+        :param grad_clip: Maximum gradient norm.
+        :param replay_ratio: Number of gradient updates per environment transition.
+        :param learning_rate: Learning rate for the optimizer.
+        :param buffer_size: Replay buffer capacity.
+        :param learning_starts: Number of transitions collected before training
+        starts.
+        :param batch_size: Minibatch size for each gradient update.
+        :param rgb: Whether observations contain RGB frames.
+        :param framestack: Number of frames in each stacked observation.
+        :param imagex: Observation image width.
+        :param imagey: Observation image height.
+        :param init_setup_model: Whether to build the networks and replay buffer
+        during initialization.
+        :param policy_kwargs: Additional arguments passed to the policy.
+        :param compile_mode: Mode passed to ``torch.compile``. ``None`` disables
+        compilation.
+        :param kwargs: Additional arguments passed to ``OffPolicyAlgorithm``.
+        """
 
         policy_kwargs = policy_kwargs or {}
-        if not "linear_size" in policy_kwargs:
+        if "linear_size" not in policy_kwargs:
             policy_kwargs["linear_size"] = 512
 
         super().__init__(
@@ -84,8 +131,8 @@ class Rainbow(OffPolicyAlgorithm):
             )
         self.grad_steps = 0
         self.replace_target_cnt = target_replace
-        self.Vmin = -10
-        self.Vmax = 10
+        self.v_min = -10
+        self.v_max = 10
         self.N_ATOMS = 51
         self.n = n
         self.grad_clip = grad_clip
@@ -105,19 +152,24 @@ class Rainbow(OffPolicyAlgorithm):
         if init_setup_model:
             self._setup_model()
 
-    def _setup_model(self):
+    def _setup_model(self) -> None:
+        """
+        Create the replay buffer, policy networks and optional compiled forwards.
+        """
+        # Create the PER buffer before the base setup to avoid allocating the
+        # default SB3 replay buffer.
         self.per_buffer = PER(
             size=self.max_mem_size,
             device=self.device,
             rgb=self.rgb,
-            n=self.n,
-            envs=self.env.num_envs,
+            n_step=self.n,
+            n_envs=self.env.num_envs,
             gamma=self.gamma,
             alpha=self.per_alpha,
             beta=self.per_beta,
             framestack=self.framestack,
-            imagex=self.imagex,
-            imagey=self.imagey,
+            image_width=self.imagex,
+            image_height=self.imagey,
         )
         self.replay_buffer = self.per_buffer
 
@@ -132,41 +184,77 @@ class Rainbow(OffPolicyAlgorithm):
         elif self.compile_mode is not None:
             logger.info(f"torch.compile skipped (needs CUDA + Linux; got {self.device.type} + {platform.system()})")
 
-    def _setup_learn(self, total_timesteps, *args, **kwargs):
+    def _setup_learn(self, total_timesteps: int, *args, **kwargs) -> tuple[int, BaseCallback]:
+        """
+        Set up training and configure PER beta annealing.
+
+        The PER beta increment is scaled by the number of parallel environments
+        because one replay-buffer ``add()`` call stores one transition per
+        environment.
+
+        :param total_timesteps: Number of environment transitions requested for training.
+        :return: The result of the parent learning setup.
+        """
         effective_total = self.total_timesteps if self.total_timesteps is not None else total_timesteps
         self.per_buffer.beta_increment = (1.0 - self.per_buffer.beta) * self.n_envs / effective_total
         return super()._setup_learn(total_timesteps, *args, **kwargs)
 
-    def train(self, gradient_steps, batch_size):        
+    def train(self, gradient_steps: int, batch_size: int) -> None:
+        """
+        Perform gradient updates.
+
+        :param gradient_steps: Number of gradient steps to perform.
+        :param batch_size: Minibatch size for each gradient update. This argument is
+        retained for compatibility with the ``OffPolicyAlgorithm`` interface.
+        """
         for _ in range(gradient_steps):
             self._train_call()
 
     @torch.no_grad()
-    def reset_noise(self, net):
+    def reset_noise(self, net: torch.nn.Module) -> None:
+        """
+        Reset the noise in all noisy linear layers of a network.
+
+        :param net: Network containing the noisy linear layers.
+        """
         for m in net.modules():
             if isinstance(m, FactorizedNoisyLinear):
                 m.reset_noise()
 
     @torch.no_grad()
-    def disable_noise(self, net):
+    def disable_noise(self, net: torch.nn.Module) -> None:
+        """
+        Disable noise in all noisy linear layers of a network.
+
+        :param net: Network containing the noisy linear layers.
+        """
         for m in net.modules():
             if isinstance(m, FactorizedNoisyLinear):
                 m.disable_noise()
 
-    def replace_target_network(self):
+    def replace_target_network(self)-> None:
+        """
+        Update the target network with the parameters of the online network.
+        """
         self.q_net_target.load_state_dict(self.q_net.state_dict())
 
-    def _sample_buffer(self):
+    def _sample_buffer(self)-> PERReplayBufferSamples:
+        """
+        Sample a minibatch from the prioritised experience replay buffer.
+
+        :return: A minibatch of transitions including PER indices and
+        importance-sampling weights.
+        """
         return self.replay_buffer.sample(self.batch_size)
 
-    def _train_call(self):
-        logger.debug(
-            f"train_call start: "
-            f"timesteps={self.num_timesteps} "
-            f"grad_steps={self.grad_steps} "
-            f"buffer_size={self.replay_buffer.size()}"
-        )
+    def _train_call(self)-> None:
+        """
+        Perform a single Rainbow DQN gradient update.
 
+        Samples a minibatch from the prioritised replay buffer, computes the
+        distributional loss, updates replay priorities and optimises the online
+        network. The target network is updated at the configured interval.
+        """
         if self.num_timesteps < self.learning_starts:
             logger.debug("Skipping training: learning_starts not reached")
             return
@@ -178,9 +266,7 @@ class Rainbow(OffPolicyAlgorithm):
         if self.grad_steps % self.replace_target_cnt == 0:
             self.replace_target_network()
 
-        logger.debug("Sampling replay buffer")
         batch = self._sample_buffer()
-        logger.debug("Replay buffer sample completed")
         obs = batch.observations
         actions = batch.actions
         rewards = batch.rewards
@@ -199,29 +285,10 @@ class Rainbow(OffPolicyAlgorithm):
         weights = weights.to(device)
         discounts = discounts.to(device)
 
-        # use this code to check your states are correct if applying to a custom env
-        # If you apply Rainbow to a custom env and don't check your states first, you are killing both
-        # trees and your own time
-
-        # plt.imshow(states[0][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        #
-        # plt.imshow(states[0][1].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        #
-        # plt.imshow(states[0][2].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        #
-        # plt.imshow(states[1][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        #
-        # plt.imshow(states[2][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-
         self.policy.optimizer.zero_grad()
         distr_v, qvals_v = self.q_net.both(obs)
         state_action_values = distr_v[torch.arange(actions.shape[0]), actions]
-        state_log_sm_v = F.log_softmax(state_action_values, dim=1)
+        state_log_sm_v = functional.log_softmax(state_action_values, dim=1)
 
         with torch.no_grad():
             # this is using Double DQN
@@ -238,8 +305,8 @@ class Rainbow(OffPolicyAlgorithm):
                 next_best_distr,
                 rewards,
                 dones,
-                self.Vmin,
-                self.Vmax,
+                self.v_min,
+                self.v_max,
                 self.N_ATOMS,
                 discounts,
             )
@@ -267,22 +334,34 @@ class Rainbow(OffPolicyAlgorithm):
         self.policy.optimizer.step()
 
         self.grad_steps += 1
-        if self.grad_steps % 10000 == 0:
+        if self.grad_steps % 10_000 == 0:
             logger.info(f"Completed {self.grad_steps} gradient steps")
-        if self.grad_steps % 10000 == 0:
             logger.info(f"Beta: {self.replay_buffer.beta}")
 
 
-def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
+def distr_projection(
+    next_distr: Tensor,
+    rewards: Tensor,
+    dones: Tensor,
+    v_min: float,
+    v_max: float,
+    n_atoms: int,
+    gamma: float | Tensor,
+    ) -> Tensor:
     """
+    Project the target distribution onto the categorical support.
+
     Perform distribution projection aka Categorical Algorithm from the
     "A Distributional Perspective on RL" paper.
 
-    gamma may be a scalar or a per-sample (batch,) tensor of bootstrap discounts
-    (gamma^k for k-step windows cut short by truncation).
-
-    Fully vectorized: a Python loop over atoms launches hundreds of small CUDA
-    kernels per gradient step, which dominates training time on GPU.
+    :param next_distr: Probability distribution over atoms for the next states.
+    :param rewards: Rewards for the sampled transitions.
+    :param dones: Whether the sampled transitions are terminal.
+    :param v_min: Minimum value of the categorical support.
+    :param v_max: Maximum value of the categorical support.
+    :param n_atoms: Number of atoms in the categorical support.
+    :param gamma: Discount factor or per-sample bootstrap discounts.
+    :return: Projected probability distribution over the categorical support.
     """
     device = next_distr.device
     batch_size = len(rewards)
@@ -295,36 +374,36 @@ def distr_projection(next_distr, rewards, dones, Vmin, Vmax, n_atoms, gamma):
     else:
         gamma = gamma.to(device).float()
 
-    delta_z = (Vmax - Vmin) / (n_atoms - 1)
-    support = torch.linspace(Vmin, Vmax, n_atoms, device=device)
+    delta_z = (v_max - v_min) / (n_atoms - 1)
+    support = torch.linspace(v_min, v_max, n_atoms, device=device)
 
     # Tz = r + gamma^k * z; terminal transitions have no bootstrap term,
     # so their whole distribution collapses onto the clamped reward.
     tz = rewards.unsqueeze(1) + gamma.unsqueeze(1) * support.unsqueeze(0)
     tz[dones] = rewards[dones].unsqueeze(1)
-    tz = tz.clamp(Vmin, Vmax)
+    tz = tz.clamp(v_min, v_max)
 
-    b = (tz - Vmin) / delta_z
-    l = b.floor().long()
-    u = b.ceil().long()
+    b = (tz - v_min) / delta_z
+    b_floor = b.floor().long()
+    b_ceil = b.ceil().long()
 
     # When b lands exactly on an atom, shift the pair so interpolation weights
     # still sum to 1 and no probability mass is dropped.
-    l[(u > 0) & (l == u)] -= 1
-    u[(l < (n_atoms - 1)) & (l == u)] += 1
+    b_floor[(b_ceil > 0) & (b_floor == b_ceil)] -= 1
+    b_ceil[(b_floor < (n_atoms - 1)) & (b_floor == b_ceil)] += 1
 
-    proj_distr = T.zeros((batch_size, n_atoms), dtype=T.float32, device=device)
+    proj_distr = torch.zeros((batch_size, n_atoms), dtype=torch.float32, device=device)
     offset = (torch.arange(batch_size, device=device) * n_atoms).unsqueeze(1)
 
     proj_distr.view(-1).index_add_(
         0,
-        (l + offset).view(-1),
-        (next_distr * (u.float() - b)).view(-1),
+        (b_floor + offset).view(-1),
+        (next_distr * (b_ceil.float() - b)).view(-1),
     )
     proj_distr.view(-1).index_add_(
         0,
-        (u + offset).view(-1),
-        (next_distr * (b - l.float())).view(-1),
+        (b_ceil + offset).view(-1),
+        (next_distr * (b - b_floor.float())).view(-1),
     )
 
     return proj_distr

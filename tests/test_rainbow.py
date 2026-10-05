@@ -1,85 +1,74 @@
+import ale_py
+import gymnasium as gym
 import numpy as np
-import pytest
 import torch
 from gymnasium import spaces
 
-from sb3_contrib.rainbow.main_agent import make_env
 from sb3_contrib.rainbow.old_agent import Agent
 from sb3_contrib.rainbow.rainbow import PER, Rainbow
 from sb3_contrib.rainbow.rainbow_policy import NatureC51, RainbowPolicy
 
 
-def test_smoke_test():
-    device = torch.device("cpu")
-
-    # minimal env
-    env = make_env(2, "Pong", framestack=4, repeat_probs=0.0)
-    obs, _ = env.reset()
-
-    n_actions = env.action_space[0].n
-
-    agent = Agent(
-        n_actions=n_actions,
-        input_dims=[4, 84, 84],
-        device=device,
-        num_envs=2,
-        agent_name="test",
-        total_steps=1000,
-        testing=True,
-        batch_size=8
+def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True):
+    return gym.vector.SyncVectorEnv(
+        [
+            lambda: gym.wrappers.FrameStackObservation(
+                gym.wrappers.AtariPreprocessing(
+                    gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
+                    terminal_on_life_loss=terminal_on_life_loss
+                ),
+                framestack
+            )
+            for _ in range(envs_create)
+        ]
     )
 
-    # one interaction step
-    action = agent.choose_action(obs)
-    obs_, reward, done_, trun_, _ = env.step(action)
 
-    # push to replay buffer
-    for i in range(2):
-        agent.store_transition(
-            obs[i], action[i], reward[i], obs_[i],
-            done_[i], trun_[i], stream=i
-        )
+def test_smoke_test():
+    env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
 
-    # force learning call
-    for _ in range(5):
-        agent.learn()
+    model = Rainbow(
+        RainbowPolicy,
+        env,
+        learning_starts=10,
+        batch_size=8,
+        buffer_size=1000,
+        device="cpu",
+    )
 
-    print("Smoke test passed")
+    model.learn(100)
+
 
 def test_network():
     net = NatureC51(4, 6, device="cpu")
-    x = torch.randn(2, 4, 84, 84)
-    out = net.qvals(x)
+    observations = torch.randn(2, 4, 84, 84)
 
-    assert out.shape == (2, 6)
+    q_values = net.qvals(observations)
+
+    assert q_values.shape == (2, 6)
 
 
 def test_replay():
-    buffer = PER(size=100, device="cpu", n=3, envs=1, gamma=0.99)
+    buffer = PER(size=100, device="cpu", n_step=3, n_envs=1, gamma=0.99)
 
     dummy_state = np.zeros((4, 84, 84), dtype=np.uint8)
 
     for _ in range(50):
-        buffer.append(dummy_state, 0, 1.0, dummy_state, False, False, stream=0)
+        buffer.append(
+            dummy_state,
+            0,
+            1.0,
+            dummy_state,
+            False,
+            False,
+            stream=0,
+        )
 
     batch = buffer.sample(8)
-    print("Replay test passed")
 
-def test_agent_action():
-    agent = Agent(
-        n_actions=4,
-        input_dims=[4, 84, 84],
-        device="cpu",
-        num_envs=1,
-        agent_name="test",
-        total_steps=1000,
-        testing=True
-    )
+    assert batch.observations.shape[0] == 8
+    assert batch.actions.shape[0] == 8
 
-    obs = np.random.randint(0, 255, (1, 4, 84, 84), dtype=np.uint8)
-    action = agent.choose_action(obs)
-
-    assert action.shape == (1,)
 
 def test_policy():
     obs_space = spaces.Box(low=0, high=255, shape=(4, 84, 84), dtype=np.uint8)
@@ -118,7 +107,6 @@ class TestRainbowBufferInterface:
         assert hasattr(batch, "idxs")
         assert hasattr(batch, "weights")
 
-
     def test_replay_sample_shapes_and_types(self):
         env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
 
@@ -144,7 +132,6 @@ class TestRainbowBufferInterface:
         assert batch.actions.dtype == torch.int64
         assert batch.rewards.dtype == torch.float32
 
-
     def test_replay_sample_device(self):
         env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
 
@@ -163,7 +150,6 @@ class TestRainbowBufferInterface:
         assert batch.observations.device.type == model.device.type
         assert batch.next_observations.device.type == model.device.type
         assert batch.weights.device.type == model.device.type
-
 
 class TestRainbowBufferPER:
 
@@ -268,7 +254,7 @@ class TestRainbowTraining:
         params_after = list(model.q_net.parameters())
 
         changed = False
-        for p_before, p_after in zip(params_before, params_after):
+        for p_before, p_after in zip(params_before, params_after, strict=True):
             if not torch.equal(p_before, p_after):
                 changed = True
                 break

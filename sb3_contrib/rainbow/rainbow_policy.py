@@ -6,13 +6,31 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn, optim
 from torch.nn import init as torch_init
+from typing import Any
+
+from gymnasium import spaces
+from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 
 
 from stable_baselines3.common.policies import BasePolicy
 
 
 class RainbowPolicy(BasePolicy):
-    def __init__(self, observation_space, action_space, lr_schedule, linear_size=512, **kwargs):
+    def __init__(self, observation_space: spaces.Space,
+        action_space: spaces.Discrete,
+        lr_schedule: Schedule,
+        linear_size: int = 512,
+        **kwargs: Any,
+        ) -> None:
+        """
+        Initialise the Rainbow policy.
+
+        :param observation_space: Observation space of the environment.
+        :param action_space: Discrete act**n space of the environment.
+        :param lr_schedule: Learning rate schedule.
+        :param linear_size: Number of units in the noisy linear hidden layers.
+        :param kwargs: Additional keyword arguments for police configuration.
+        """
         super().__init__(observation_space, action_space, lr_schedule)
 
         obs_shape = observation_space.shape
@@ -36,32 +54,65 @@ class RainbowPolicy(BasePolicy):
 
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr_schedule(1), eps=1.5e-4)
 
-    def forward(self, obs):
+    def forward(self, obs: Tensor) -> Tensor:
+        """
+        Compute Q-values for the given observations.
+
+        :param obs: Batch of observations.
+        :return: Q-values for each observation and action.
+        """
         return self.q_net.qvals(obs)
 
-    def _predict(self, obs, deterministic=True):
+    def _predict(
+            self,
+            observation: PyTorchObs,
+            deterministic: bool = False,
+        ) -> Tensor:
+        """
+        Predict actions for the given observations.
+
+        :param observation: Batch of observations.
+        :param deterministic: Whether to disable NoisyNet noise for prediction.
+        :return: Greedy action for each observation.
+        """
         if deterministic:
-            # evaluation protocol: greedy actions with noisy-net noise disabled
             self.disable_noise()
         else:
             self.reset_noise()
-        qvals = self.forward(obs)
+        qvals = self.forward(observation)
         return qvals.argmax(dim=1)
 
-    def disable_noise(self):
+    @torch.no_grad()
+    def disable_noise(self) -> None:
+        """
+        Disable noise in all noisy linear layers of the online network.
+        """
         for module in self.q_net.modules():
             if isinstance(module, FactorizedNoisyLinear):
                 module.disable_noise()
 
-    def reset_noise(self):
+    @torch.no_grad()
+    def reset_noise(self)-> None:
+        """
+        Resample the noise in all noisy linear layers of the online network.
+        """
         for module in self.q_net.modules():
             if isinstance(module, FactorizedNoisyLinear):
                 module.reset_noise()
 
 
 class FactorizedNoisyLinear(nn.Module):
-    """ The factorized Gaussian noise layer for noisy-nets dqn. """
-    def __init__(self, in_features: int, out_features: int, sigma_0=0.5, self_norm=False) -> None:
+    """
+    Linear layer with factorised Gaussian noise for NoisyNet exploration.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        sigma_0: float = 0.5,
+        self_norm: bool = False,
+        ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -87,7 +138,9 @@ class FactorizedNoisyLinear(nn.Module):
 
     @torch.no_grad()
     def reset_parameters(self) -> None:
-        # initialization is similar to Kaiming uniform (He. initialization) with fan_mode=fan_in
+        """
+        Initialise the learnable parameters of the noisy linear layer.
+        """
         scale = 1 / sqrt(self.in_features)
 
         torch_init.uniform_(self.weight_mu, -scale, scale)
@@ -98,8 +151,9 @@ class FactorizedNoisyLinear(nn.Module):
 
     @torch.no_grad()
     def reset_parameters_self_norm(self) -> None:
-        # initialization is similar to Kaiming uniform (He. initialization) with fan_mode=fan_in
-
+        """
+        Initialise the layer parameters using self-normalising initialisation.
+        """
         nn.init.normal_(self.weight_mu, std=1 / math.sqrt(self.out_features))
         if self.bias_mu is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_mu)
@@ -108,13 +162,23 @@ class FactorizedNoisyLinear(nn.Module):
 
     @torch.no_grad()
     def _get_noise(self, size: int) -> Tensor:
+        """
+        Generate factorised Gaussian noise.
+
+        :param size: Number of noise values to generate.
+        :return: Transformed Gaussian noise tensor.
+        """
         noise = torch.randn(size, device=self.weight_mu.device)
-        # f(x) = sgn(x)sqrt(|x|)
         return noise.sign().mul_(noise.abs().sqrt_())
 
     @torch.no_grad()
     def reset_noise(self) -> None:
-        # like in eq 10 and 11 of the paper
+        """
+        Resample the factorised Gaussian noise.
+
+        Independent noise vectors are generated for the input and output features
+        and combined to update the weight and bias noise buffers.
+        """
         epsilon_in = self._get_noise(self.in_features)
         epsilon_out = self._get_noise(self.out_features)
         self.weight_epsilon.copy_(epsilon_out.outer(epsilon_in))
@@ -122,22 +186,49 @@ class FactorizedNoisyLinear(nn.Module):
 
     @torch.no_grad()
     def disable_noise(self) -> None:
+        """
+        Disable factorised Gaussian noise in the layer.
+        """
         self.weight_epsilon[:] = 0
         self.bias_epsilon[:] = 0
 
     def forward(self, input: Tensor) -> Tensor:
-        # y = wx + d, where
-        # w = \mu^w + \sigma^w * \epsilon^w
-        # b = \mu^b + \sigma^b * \epsilon^b
+        """
+        Apply the noisy linear transformation.
+
+        :param input: Input tensor.
+        :return: Output tensor after applying the noisy weights and biases.
+        """
         return F.linear(input,
                         self.weight_mu + self.weight_sigma*self.weight_epsilon,
                         self.bias_mu + self.bias_sigma*self.bias_epsilon)
 
 class NatureC51(nn.Module):
     """
-    Implementation of the Nature CNN, with the Categorical heads used for C51.
+    Nature CNN with dueling categorical heads for Rainbow DQN.
     """
-    def __init__(self, in_depth, actions, atoms=51, Vmin=-10, Vmax=10, device='cuda:0', linear_size=512):
+
+    def __init__(
+        self,
+        in_depth: int,
+        actions: int,
+        device: torch.device | str,
+        atoms: int = 51,
+        v_min: float = -10.0,
+        v_max: float = 10.0,
+        linear_size: int = 512,
+    ) -> None:
+        """
+        Initialise the categorical dueling Q-network.
+
+        :param in_depth: Number of input channels.
+        :param actions: Number of discrete actions.
+        :param atoms: Number of atoms in the categorical value distribution.
+        :param v_min: Minimum value of the categorical support.
+        :param v_max: Maximum value of the categorical support.
+        :param device: PyTorch device on which to place the network.
+        :param linear_size: Number of units in the noisy linear hidden layers.
+        """
         super().__init__()
 
         self.actions = actions
@@ -145,7 +236,7 @@ class NatureC51(nn.Module):
         self.device = device
         self.linear_size = linear_size
 
-        DELTA_Z = (Vmax - Vmin) / (atoms - 1)
+        delta_z = (v_max - v_min) / (atoms - 1)
 
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels=in_depth, out_channels=32, kernel_size=8, stride=4),
@@ -164,33 +255,61 @@ class NatureC51(nn.Module):
         self.fcV2 = FactorizedNoisyLinear(self.linear_size, self.atoms)
         self.fcA2 = FactorizedNoisyLinear(self.linear_size, actions * self.atoms)
 
-        self.register_buffer("supports", torch.arange(Vmin, Vmax+DELTA_Z, DELTA_Z))
+        self.register_buffer("supports", torch.arange(v_min, v_max+delta_z, delta_z))
         self.softmax = nn.Softmax(dim=1)
 
         self.to(device)
 
-    def reset_noise(self):
-        for name, module in self.named_children():
-            if 'fc' in name:
+    @torch.no_grad()
+    def reset_noise(self) -> None:
+        """
+        Resample the noise in all noisy linear layers.
+        """
+        for module in self.modules():
+            if isinstance(module, FactorizedNoisyLinear):
                 module.reset_noise()
 
-    def _get_conv_out(self, shape):
+    def _get_conv_out(self, shape: tuple[int, ...]) -> int:
+        """
+        Compute the flattened output size of the convolutional network.
+
+        :param shape: Shape of a single input observation.
+        :return: Flattened size of the convolutional output.
+        """
         o = self.conv(torch.zeros(1, *shape))
         return int(np.prod(o.size()))
 
-    def fc_val(self, x):
+    def fc_val(self, x: Tensor) -> Tensor:
+        """
+        Compute the categorical value-stream output.
+
+        :param x: Flattened convolutional features.
+        :return: Logits produced by the value stream.
+        """
         x = F.relu(self.fc1V(x))
         x = self.fcV2(x)
 
         return x
 
-    def fc_adv(self, x):
+    def fc_adv(self, x: Tensor) -> Tensor:
+        """
+        Compute the categorical advantage-stream output.
+
+        :param x: Flattened convolutional features.
+        :return: Logits produced by the advantage stream.
+        """
         x = F.relu(self.fc1A(x))
         x = self.fcA2(x)
 
         return x
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Compute the categorical action-value logits.
+
+        :param x: Batch of observations.
+        :return: Categorical logits for each action and atom.
+        """
         batch_size = x.size()[0]
         device = next(self.parameters()).device
         fx = x.to(device).float() / 255
@@ -203,23 +322,50 @@ class NatureC51(nn.Module):
         adv_mean = adv_out.mean(dim=1, keepdim=True)
         return val_out + (adv_out - adv_mean)
 
-    def both(self, x):
+    def both(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Compute the categorical logits and expected Q-values.
+
+        :param x: Batch of observations.
+        :return: Categorical logits and expected Q-values.
+        """
         cat_out = self(x)
         probs = self.apply_softmax(cat_out)
         weights = probs * self.supports
         res = weights.sum(dim=2)
         return cat_out, res
 
-    def qvals(self, x, advantages_only=False):
+    def qvals(self, x: Tensor, advantages_only: bool = False) -> Tensor:
+        """
+        Compute expected Q-values for each action.
+
+        :param x: Batch of observations.
+        :param advantages_only: Whether to return only advantage values.
+        :return: Expected Q-values for each action.
+        """
         return self.both(x)[1]
 
-    def apply_softmax(self, t):
+    def apply_softmax(self, t: Tensor) -> Tensor:
+        """
+        Apply softmax over the categorical atoms.
+
+        :param t: Categorical logits.
+        :return: Probability distribution over atoms.
+        """
         return self.softmax(t.view(-1, self.atoms)).view(t.size())
 
-    def save_checkpoint(self, name):
-        #print('... saving checkpoint ...')
+    def save_checkpoint(self, name: str) -> None:
+        """
+        Save the network parameters to a checkpoint.
+
+        :param name: Base name of the checkpoint file.
+        """
         torch.save(self.state_dict(), name + ".model")
 
-    def load_checkpoint(self, name):
-        #print('... loading checkpoint ...')
+    def load_checkpoint(self, name: str) -> None:
+        """
+        Load network parameters from a checkpoint.
+
+        :param name: Name of the checkpoint file.
+        """
         self.load_state_dict(torch.load(name))

@@ -84,7 +84,7 @@ class Agent:
         self.framestack = framestack
         self.rgb = rgb
         self.memory = PER(self.max_mem_size, device, self.n, num_envs, self.gamma, alpha=self.per_alpha,
-                          beta=self.per_beta, framestack=self.framestack, rgb=self.rgb, imagex=imagex, imagey=imagey)
+                          beta=self.per_beta, framestack=self.framestack, rgb=self.rgb, image_width=imagex, image_height=imagey)
 
         self.network_creator_fn = partial(create_network, self.input_dims, self.n_actions, self.device, self.linear_size)
 
@@ -142,7 +142,7 @@ class Agent:
             state = np.expand_dims(state, axis=0)
             next_state = np.expand_dims(next_state, axis=0)
 
-        self.memory.append(state, action, reward, next_state, done, trun, stream, prio=prio)
+        self.memory.append(state, action, reward, next_state, done, trun, stream)
 
         self.env_steps += 1
         # anneal PER's beta
