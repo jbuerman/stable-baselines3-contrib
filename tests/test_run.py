@@ -6,6 +6,8 @@ from stable_baselines3.common.vec_env import VecNormalize
 from sb3_contrib import ARS, QRDQN, TQC, TRPO, CrossQ, MaskablePPO
 from sb3_contrib.common.envs import InvalidActionEnvDiscrete
 from sb3_contrib.common.vec_env import AsyncEval
+from sb3_contrib.rainbow.rainbow import Rainbow
+from sb3_contrib.rainbow.rainbow_policy import RainbowPolicy
 
 
 def test_crossq():
@@ -78,6 +80,21 @@ def test_qrdqn():
 def test_trpo(env_id):
     model = TRPO("MlpPolicy", env_id, n_steps=128, seed=0, policy_kwargs=dict(net_arch=[16]), verbose=1)
     model.learn(total_timesteps=500)
+
+
+def test_rainbow():
+    env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+
+    model = Rainbow(
+        RainbowPolicy,
+        env,
+        learning_starts=10,
+        batch_size=8,
+        buffer_size=1000,
+        device="cpu",
+    )
+
+    model.learn(100)
 
 
 def test_trpo_params():

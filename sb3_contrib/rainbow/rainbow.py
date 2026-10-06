@@ -47,7 +47,7 @@ class Rainbow(OffPolicyAlgorithm):
         framestack: int = 4,
         image_width: int = 84,
         image_height: int = 84,
-        init_setup_model: bool = True,
+        _init_setup_model: bool = True,
         policy_kwargs: dict[str, Any] | None = None,
         compile_mode: str | None = "max-autotune",
         **kwargs: Any,
@@ -71,7 +71,7 @@ class Rainbow(OffPolicyAlgorithm):
         :param framestack: Number of frames in each stacked observation.
         :param image_width: Observation image width.
         :param image_height: Observation image height.
-        :param init_setup_model: Whether to build the networks and replay buffer
+        :param _init_setup_model: Whether to build the networks and replay buffer
         during initialization.
         :param policy_kwargs: Additional arguments passed to the policy.
         :param compile_mode: Mode passed to ``torch.compile``. ``None`` disables
@@ -138,7 +138,7 @@ class Rainbow(OffPolicyAlgorithm):
         self.image_width = image_width
         self.image_height = image_height
 
-        if init_setup_model:
+        if _init_setup_model:
             self._setup_model()
 
     def _setup_model(self) -> None:

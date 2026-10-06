@@ -24,8 +24,9 @@ class SumTree:
         self.index = 0
         self.size = size
         self.full = False  # Used to track actual capacity
-        self.tree_start = 2 ** (size-1).bit_length() - 1  # Put all used node leaves on last tree level
-        self.sum_tree = np.zeros((self.tree_start + self.size,), dtype=np.float32)
+        leaf_count = 2 ** (size - 1).bit_length()  # Put all used node leaves on last tree level
+        self.tree_start = leaf_count - 1
+        self.sum_tree = np.zeros(2 * leaf_count - 1, dtype=np.float32)
         self.max = 1.0  # Initial max value to return (1 = 1^ω)
 
     def _update_nodes(self, indices: np.ndarray) -> None:
