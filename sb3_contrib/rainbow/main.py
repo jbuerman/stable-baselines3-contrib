@@ -54,7 +54,7 @@ def choose_eval_action(observation, eval_net, device):
     # noise is zeroed once on the eval net after loading, do not reset it here
     with torch.no_grad():
         state = torch.tensor(observation, dtype=torch.float32).to(device)
-        qvals = eval_net.qvals(state, advantages_only=True)
+        qvals = eval_net.qvals(state)
         action = torch.argmax(qvals, dim=1).cpu()
     return action
 
@@ -483,12 +483,11 @@ def main():
     agent = Rainbow(
         RainbowPolicy,
         env,
-        total_timesteps=n_steps,
-        target_replace=c,
+        target_update_interval=c,
         gamma=discount,
         per_alpha=per_alpha,
-        n=nstep,
-        grad_clip=grad_clip,
+        n_steps=nstep,
+        max_grad_norm=grad_clip,
         replay_ratio=replay_ratio,
         compile_mode=compile_mode,
         learning_starts=20000,

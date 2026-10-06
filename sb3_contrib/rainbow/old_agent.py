@@ -130,7 +130,7 @@ class Agent:
 
             state = T.tensor(observation, dtype=T.float).to(self.net.device)
 
-            qvals = self.net.qvals(state, advantages_only=True)
+            qvals = self.net.qvals(state)
             x = T.argmax(qvals, dim=1).cpu()
 
             return x

@@ -16,7 +16,7 @@ from sb3_contrib.rainbow.old_agent import Agent
 def choose_eval_action(observation, eval_net, device):
     with torch.no_grad():
         state = T.tensor(observation, dtype=T.float).to(device)
-        qvals = eval_net.qvals(state, advantages_only=True)
+        qvals = eval_net.qvals(state)
         x = T.argmax(qvals, dim=1).cpu()
 
     return x

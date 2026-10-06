@@ -31,7 +31,7 @@ class RainbowPolicy(BasePolicy):
         :param linear_size: Number of units in the noisy linear hidden layers.
         :param kwargs: Additional keyword arguments for police configuration.
         """
-        super().__init__(observation_space, action_space, lr_schedule)
+        super().__init__(observation_space, action_space)
 
         obs_shape = observation_space.shape
         n_actions = action_space.n
@@ -42,6 +42,8 @@ class RainbowPolicy(BasePolicy):
             in_depth=obs_shape[0],
             actions=n_actions,
             device=self.device,
+            image_width=obs_shape[1],
+            image_height=obs_shape[2],
             linear_size=linear_size,
         )
 
@@ -49,6 +51,8 @@ class RainbowPolicy(BasePolicy):
             in_depth=obs_shape[0],
             actions=n_actions,
             device=self.device,
+            image_width=obs_shape[1],
+            image_height=obs_shape[2],
             linear_size=linear_size,
         )
 
@@ -155,10 +159,14 @@ class FactorizedNoisyLinear(nn.Module):
         Initialise the layer parameters using self-normalising initialisation.
         """
         nn.init.normal_(self.weight_mu, std=1 / math.sqrt(self.out_features))
-        if self.bias_mu is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_mu)
-            bound = 1 / math.sqrt(fan_in)
-            nn.init.uniform_(self.bias_mu, -bound, bound)
+
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_mu)
+        bound = 1 / math.sqrt(fan_in)
+        nn.init.uniform_(self.bias_mu, -bound, bound)
+
+        scale = 1 / sqrt(self.in_features)
+        torch_init.constant_(self.weight_sigma, self.sigma_0 * scale)
+        torch_init.constant_(self.bias_sigma, self.sigma_0 * scale)
 
     @torch.no_grad()
     def _get_noise(self, size: int) -> Tensor:
@@ -213,6 +221,8 @@ class NatureC51(nn.Module):
         in_depth: int,
         actions: int,
         device: torch.device | str,
+        image_width: int = 84,
+        image_height: int = 84,
         atoms: int = 51,
         v_min: float = -10.0,
         v_max: float = 10.0,
@@ -223,6 +233,8 @@ class NatureC51(nn.Module):
 
         :param in_depth: Number of input channels.
         :param actions: Number of discrete actions.
+        :param image_width: Observation image width.
+        :param image_height: Observation image height.
         :param atoms: Number of atoms in the categorical value distribution.
         :param v_min: Minimum value of the categorical support.
         :param v_max: Maximum value of the categorical support.
@@ -247,7 +259,7 @@ class NatureC51(nn.Module):
             nn.ReLU(),
         )
 
-        conv_out_size = 3136
+        conv_out_size = self._get_conv_out((in_depth, image_width, image_height))
 
         # Noisy Linear Layers, with both value and advantage functions for dueling DQN
         self.fc1V = FactorizedNoisyLinear(conv_out_size, self.linear_size)
@@ -335,12 +347,11 @@ class NatureC51(nn.Module):
         res = weights.sum(dim=2)
         return cat_out, res
 
-    def qvals(self, x: Tensor, advantages_only: bool = False) -> Tensor:
+    def qvals(self, x: Tensor) -> Tensor:
         """
         Compute expected Q-values for each action.
 
         :param x: Batch of observations.
-        :param advantages_only: Whether to return only advantage values.
         :return: Expected Q-values for each action.
         """
         return self.both(x)[1]

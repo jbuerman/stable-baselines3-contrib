@@ -33,13 +33,11 @@ class Rainbow(OffPolicyAlgorithm):
         self,
         policy: str | type[BasePolicy],
         env: GymEnv | str,
-        total_timesteps: int | None = None,
-        target_replace: int = 2000,
+        target_update_interval: int = 2000,
         per_alpha: float = 0.5,
         gamma: float = 0.99,
-        max_mem_size: int | None = None,
-        n: int = 3,
-        grad_clip: float = 10,
+        n_steps: int = 3,
+        max_grad_norm: float = 10,
         replay_ratio: float = 0.25,
         learning_rate: float | Schedule = 6.25e-5,
         buffer_size: int = 1_000_000,
@@ -47,8 +45,8 @@ class Rainbow(OffPolicyAlgorithm):
         batch_size: int = 32,
         rgb: bool = False,
         framestack: int = 4,
-        imagex: int = 84,
-        imagey: int = 84,
+        image_width: int = 84,
+        image_height: int = 84,
         init_setup_model: bool = True,
         policy_kwargs: dict[str, Any] | None = None,
         compile_mode: str | None = "max-autotune",
@@ -57,17 +55,12 @@ class Rainbow(OffPolicyAlgorithm):
         """
         :param policy: The policy model to use.
         :param env: The environment to learn from.
-        :param total_timesteps: Total number of environment transitions used to
-        schedule PER beta annealing. If ``None``, the value passed to
-        ``learn()`` is used.
-        :param target_replace: Number of gradient steps between target network
+        :param target_update_interval: Number of gradient steps between target network
         updates.
         :param per_alpha: Priority exponent used by prioritized experience replay.
         :param gamma: Discount factor.
-        :param max_mem_size: Explicit override for the replay buffer capacity.
-        If ``None``, ``buffer_size`` is used.
-        :param n: Number of steps used for multi-step returns.
-        :param grad_clip: Maximum gradient norm.
+        :param n_steps: Number of steps used for multi-step returns.
+        :param max_grad_norm: Maximum gradient norm.
         :param replay_ratio: Number of gradient updates per environment transition.
         :param learning_rate: Learning rate for the optimizer.
         :param buffer_size: Replay buffer capacity.
@@ -76,8 +69,8 @@ class Rainbow(OffPolicyAlgorithm):
         :param batch_size: Minibatch size for each gradient update.
         :param rgb: Whether observations contain RGB frames.
         :param framestack: Number of frames in each stacked observation.
-        :param imagex: Observation image width.
-        :param imagey: Observation image height.
+        :param image_width: Observation image width.
+        :param image_height: Observation image height.
         :param init_setup_model: Whether to build the networks and replay buffer
         during initialization.
         :param policy_kwargs: Additional arguments passed to the policy.
@@ -130,24 +123,20 @@ class Rainbow(OffPolicyAlgorithm):
                 f"(train_freq={self.train_freq[0]} steps, gradient_steps={self.gradient_steps})"
             )
         self.grad_steps = 0
-        self.replace_target_cnt = target_replace
+        self.replace_target_cnt = target_update_interval
         self.v_min = -10
         self.v_max = 10
         self.N_ATOMS = 51
-        self.n = n
-        self.grad_clip = grad_clip
+        self.n_steps = n_steps
+        self.grad_clip = max_grad_norm
 
         self.rgb = rgb
 
-        # buffer_size is the standard SB3 name; max_mem_size kept as an explicit override
-        self.max_mem_size = max_mem_size if max_mem_size is not None else buffer_size
         self.per_alpha = per_alpha
         self.per_beta = 0.4
         self.framestack = framestack
-        self.imagex = imagex
-        self.imagey = imagey
-
-        self.total_timesteps = total_timesteps
+        self.image_width = image_width
+        self.image_height = image_height
 
         if init_setup_model:
             self._setup_model()
@@ -159,17 +148,17 @@ class Rainbow(OffPolicyAlgorithm):
         # Create the PER buffer before the base setup to avoid allocating the
         # default SB3 replay buffer.
         self.per_buffer = PER(
-            size=self.max_mem_size,
+            size=self.buffer_size,
             device=self.device,
             rgb=self.rgb,
-            n_step=self.n,
+            n_step=self.n_steps,
             n_envs=self.env.num_envs,
             gamma=self.gamma,
             alpha=self.per_alpha,
             beta=self.per_beta,
             framestack=self.framestack,
-            image_width=self.imagex,
-            image_height=self.imagey,
+            image_width=self.image_width,
+            image_height=self.image_height,
         )
         self.replay_buffer = self.per_buffer
 
@@ -195,8 +184,7 @@ class Rainbow(OffPolicyAlgorithm):
         :param total_timesteps: Number of environment transitions requested for training.
         :return: The result of the parent learning setup.
         """
-        effective_total = self.total_timesteps if self.total_timesteps is not None else total_timesteps
-        self.per_buffer.beta_increment = (1.0 - self.per_buffer.beta) * self.n_envs / effective_total
+        self.per_buffer.beta_increment = (1.0 - self.per_buffer.beta) * self.n_envs / total_timesteps
         return super()._setup_learn(total_timesteps, *args, **kwargs)
 
     def train(self, gradient_steps: int, batch_size: int) -> None:
@@ -208,7 +196,7 @@ class Rainbow(OffPolicyAlgorithm):
         retained for compatibility with the ``OffPolicyAlgorithm`` interface.
         """
         for _ in range(gradient_steps):
-            self._train_call()
+            self._train_call(batch_size)
 
     @torch.no_grad()
     def reset_noise(self, net: torch.nn.Module) -> None:
@@ -238,22 +226,25 @@ class Rainbow(OffPolicyAlgorithm):
         """
         self.q_net_target.load_state_dict(self.q_net.state_dict())
 
-    def _sample_buffer(self)-> PERReplayBufferSamples:
+    def _sample_buffer(self, batch_size: int)-> PERReplayBufferSamples:
         """
         Sample a minibatch from the prioritised experience replay buffer.
 
+        :param batch_size: Number of transitions to sample.
         :return: A minibatch of transitions including PER indices and
         importance-sampling weights.
         """
-        return self.replay_buffer.sample(self.batch_size)
+        return self.replay_buffer.sample(batch_size)
 
-    def _train_call(self)-> None:
+    def _train_call(self, batch_size: int)-> None:
         """
         Perform a single Rainbow DQN gradient update.
 
         Samples a minibatch from the prioritised replay buffer, computes the
         distributional loss, updates replay priorities and optimises the online
         network. The target network is updated at the configured interval.
+
+        :param batch_size: Number of transitions to sample.
         """
         if self.num_timesteps < self.learning_starts:
             logger.debug("Skipping training: learning_starts not reached")
@@ -266,7 +257,7 @@ class Rainbow(OffPolicyAlgorithm):
         if self.grad_steps % self.replace_target_cnt == 0:
             self.replace_target_network()
 
-        batch = self._sample_buffer()
+        batch = self._sample_buffer(batch_size)
         obs = batch.observations
         actions = batch.actions
         rewards = batch.rewards
@@ -285,19 +276,24 @@ class Rainbow(OffPolicyAlgorithm):
         weights = weights.to(device)
         discounts = discounts.to(device)
 
+        batch_indices = torch.arange(
+            actions.shape[0],
+            device=actions.device,
+        )
+
         self.policy.optimizer.zero_grad()
-        distr_v, qvals_v = self.q_net.both(obs)
-        state_action_values = distr_v[torch.arange(actions.shape[0]), actions]
+        distr_v, _ = self.q_net.both(obs)
+        state_action_values = distr_v[batch_indices, actions]
         state_log_sm_v = functional.log_softmax(state_action_values, dim=1)
 
         with torch.no_grad():
             # this is using Double DQN
-            next_distr_v, next_qvals_v = self.q_net_target.both(next_obs)
-            action_distr_v, action_qvals_v = self.q_net.both(next_obs)
+            next_distr_v, _ = self.q_net_target.both(next_obs)
+            _, action_qvals_v = self.q_net.both(next_obs)
 
             next_actions_v = action_qvals_v.max(1)[1]
 
-            next_best_distr_v = next_distr_v[range(self.batch_size), next_actions_v.data]
+            next_best_distr_v = next_distr_v[batch_indices, next_actions_v.data]
             next_best_distr_v = self.q_net_target.apply_softmax(next_best_distr_v)
             next_best_distr = next_best_distr_v.detach()
 
