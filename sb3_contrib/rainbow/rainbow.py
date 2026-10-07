@@ -4,7 +4,7 @@ Rainbow DQN.
 
 import logging
 import platform
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
@@ -14,8 +14,9 @@ from stable_baselines3.common.type_aliases import GymEnv, Schedule
 from torch import Tensor
 from torch.nn import functional
 
-from sb3_contrib.rainbow.rainbow_buffer import PER, PERReplayBufferSamples
-from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear
+from sb3_contrib.rainbow.buffer import PER, PERReplayBufferSamples
+from sb3_contrib.rainbow.policy import FactorizedNoisyLinear, RainbowPolicy
+
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,11 @@ class Rainbow(OffPolicyAlgorithm):
     distributional Q-learning, Double DQN, dueling networks, noisy networks,
     prioritized experience replay and multi-step returns.
     """
+
+    policy_aliases: ClassVar[dict[str, type[BasePolicy]]] = {
+        "CnnPolicy": RainbowPolicy,
+    }
+
 
     def __init__(
         self,

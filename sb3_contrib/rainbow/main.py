@@ -15,7 +15,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from sb3_contrib.rainbow.envpool_env import make_atari_envpool
 from sb3_contrib.rainbow.rainbow import Rainbow
-from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
+from sb3_contrib.rainbow.policy import FactorizedNoisyLinear, NatureC51, RainbowPolicy
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)

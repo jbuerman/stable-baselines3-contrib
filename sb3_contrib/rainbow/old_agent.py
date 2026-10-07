@@ -12,9 +12,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from sb3_contrib.rainbow.rainbow import distr_projection
-from sb3_contrib.rainbow.rainbow_buffer import PER
-from sb3_contrib.rainbow.rainbow_policy import FactorizedNoisyLinear
-from sb3_contrib.rainbow.rainbow_policy import NatureC51
+from sb3_contrib.rainbow.buffer import PER
+from sb3_contrib.rainbow.policy import FactorizedNoisyLinear
+from sb3_contrib.rainbow.policy import NatureC51
 
 
 def create_network(input_dims, n_actions, device, linear_size):

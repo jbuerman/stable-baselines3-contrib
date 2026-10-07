@@ -5,7 +5,7 @@ import torch
 
 from sb3_contrib.rainbow.old_agent import Agent
 from sb3_contrib.rainbow.rainbow import Rainbow
-from sb3_contrib.rainbow.rainbow_policy import (
+from sb3_contrib.rainbow.policy import (
     RainbowPolicy,
 )
 

@@ -8,7 +8,6 @@ from sb3_contrib import ARS, QRDQN, TQC, TRPO, CrossQ, MaskablePPO
 from sb3_contrib.common.envs import InvalidActionEnvDiscrete
 from sb3_contrib.common.vec_env import AsyncEval
 from sb3_contrib.rainbow.rainbow import Rainbow
-from sb3_contrib.rainbow.rainbow_policy import RainbowPolicy
 
 
 def test_crossq():
@@ -93,7 +92,7 @@ def test_rainbow():
     )
 
     model = Rainbow(
-        RainbowPolicy,
+        "CnnPolicy",
         env,
         learning_starts=10,
         batch_size=8,

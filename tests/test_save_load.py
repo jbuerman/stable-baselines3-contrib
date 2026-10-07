@@ -15,7 +15,6 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from sb3_contrib import ARS, QRDQN, TQC, TRPO, CrossQ
 from sb3_contrib.rainbow.rainbow import Rainbow
-from sb3_contrib.rainbow.rainbow_policy import RainbowPolicy
 
 MODEL_LIST = [ARS, QRDQN, TQC, TRPO, CrossQ]
 
@@ -521,7 +520,7 @@ def test_rainbow_save_load(tmp_path):
     )
 
     model = Rainbow(
-        RainbowPolicy,
+        "CnnPolicy",
         env,
         learning_starts=10,
         batch_size=8,

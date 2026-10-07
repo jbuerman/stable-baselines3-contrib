@@ -5,12 +5,14 @@ import torch
 from gymnasium import spaces
 
 from sb3_contrib.rainbow.rainbow import Rainbow, distr_projection
-from sb3_contrib.rainbow.rainbow_buffer import PER, SumTree
-from sb3_contrib.rainbow.rainbow_policy import (
+from sb3_contrib.rainbow.buffer import PER, SumTree
+from sb3_contrib.rainbow.policy import (
     FactorizedNoisyLinear,
     NatureC51,
     RainbowPolicy,
 )
+
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 
 def make_env(
@@ -813,3 +815,36 @@ class TestRainbowTraining:
         expected_increment = (1.0 - initial_beta) * model.n_envs / 1000
 
         assert model.per_buffer.beta_increment == pytest.approx(expected_increment)
+
+
+def test_subproc_vec_env():
+    n_envs = 2
+
+    env = SubprocVecEnv(
+        [
+            lambda: FakeImageEnv(
+                screen_height=84,
+                screen_width=84,
+                n_channels=4,
+                channel_first=True,
+                discrete=True,
+            )
+            for _ in range(n_envs)
+        ]
+    )
+
+    model = Rainbow(
+        "CnnPolicy",
+        env,
+        learning_starts=10,
+        batch_size=8,
+        buffer_size=1000,
+        device="cpu",
+        compile_mode=None,
+    )
+
+    model.learn(100)
+
+    assert model.n_envs == n_envs
+
+    env.close()
