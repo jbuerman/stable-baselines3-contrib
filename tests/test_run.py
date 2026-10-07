@@ -1,6 +1,7 @@
 import gymnasium as gym
 import pytest
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.envs import FakeImageEnv
 from stable_baselines3.common.vec_env import VecNormalize
 
 from sb3_contrib import ARS, QRDQN, TQC, TRPO, CrossQ, MaskablePPO
@@ -83,7 +84,13 @@ def test_trpo(env_id):
 
 
 def test_rainbow():
-    env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+    env = FakeImageEnv(
+        screen_height=84,
+        screen_width=84,
+        n_channels=4,
+        channel_first=True,
+        discrete=True,
+    )
 
     model = Rainbow(
         RainbowPolicy,

@@ -1,13 +1,28 @@
 import ale_py
+import gymnasium as gym
 import numpy as np
 import torch
-from test_rainbow import make_env
 
 from sb3_contrib.rainbow.old_agent import Agent
 from sb3_contrib.rainbow.rainbow import Rainbow
 from sb3_contrib.rainbow.rainbow_policy import (
     RainbowPolicy,
 )
+
+
+def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True):
+    return gym.vector.SyncVectorEnv(
+        [
+            lambda: gym.wrappers.FrameStackObservation(
+                gym.wrappers.AtariPreprocessing(
+                    gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
+                    terminal_on_life_loss=terminal_on_life_loss
+                ),
+                framestack
+            )
+            for _ in range(envs_create)
+        ]
+    )
 
 
 class TestRegressionVsAgent:

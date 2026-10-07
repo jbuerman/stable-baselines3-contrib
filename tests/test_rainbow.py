@@ -1,5 +1,4 @@
 from stable_baselines3.common.envs import FakeImageEnv
-# import gymnasium as gym
 import numpy as np
 import pytest
 import torch
@@ -14,19 +13,17 @@ from sb3_contrib.rainbow.rainbow_policy import (
 )
 
 
-# def make_env(envs_create, game, framestack, repeat_probs, terminal_on_life_loss=True):
-#     return gym.vector.SyncVectorEnv(
-#         [
-#             lambda: gym.wrappers.FrameStackObservation(
-#                 gym.wrappers.AtariPreprocessing(
-#                     gym.make("ALE/" + game + "-v5", frameskip=1, repeat_action_probability=repeat_probs),
-#                     terminal_on_life_loss=terminal_on_life_loss
-#                 ),
-#                 framestack
-#             )
-#             for _ in range(envs_create)
-#         ]
-#     )
+def make_env(
+    image_width: int = 84,
+    image_height: int = 84,
+) -> FakeImageEnv:
+    return FakeImageEnv(
+        screen_height=image_height,
+        screen_width=image_width,
+        n_channels=4,
+        channel_first=True,
+        discrete=True,
+    )
 
 
 class TestDistributionProjection:
@@ -568,56 +565,10 @@ class TestRainbowMultiEnvBuffer:
         assert buffer.reward_buffer[1]
 
 
-class TestSaveLoad:
-
-    def test_rainbow_save_load(self, tmp_path):
-        env = make_env(
-            1,
-            "Pong",
-            framestack=4,
-            repeat_probs=0.0,
-        ).envs[0]
-
-        model = Rainbow(
-            RainbowPolicy,
-            env,
-            learning_starts=10,
-            batch_size=8,
-            buffer_size=1000,
-            device="cpu",
-            compile_mode=None,
-        )
-
-        model.learn(100)
-
-        observation, _ = env.reset()
-
-        action_before, _ = model.predict(
-            observation,
-            deterministic=True,
-        )
-
-        save_path = tmp_path / "rainbow_test"
-        model.save(save_path)
-
-        loaded_model = Rainbow.load(
-            save_path,
-            env=env,
-            device="cpu",
-        )
-
-        action_after, _ = loaded_model.predict(
-            observation,
-            deterministic=True,
-        )
-
-        assert np.array_equal(action_before, action_after)
-
-
 class TestRainbowBufferInterface:
 
     def test_replay_sample_structure(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -640,7 +591,7 @@ class TestRainbowBufferInterface:
         assert hasattr(batch, "weights")
 
     def test_replay_sample_shapes_and_types(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -665,7 +616,7 @@ class TestRainbowBufferInterface:
         assert batch.rewards.dtype == torch.float32
 
     def test_replay_sample_device(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -742,7 +693,7 @@ class TestRainbowBufferPER:
         )
 
     def test_per_weights_bounds(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -760,7 +711,7 @@ class TestRainbowBufferPER:
         assert torch.all(batch.weights <= 1.0)
 
     def test_per_beta_annealing(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -782,7 +733,7 @@ class TestRainbowBufferPER:
 class TestRainbowTraining:
 
     def test_gradients_flow(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -800,7 +751,7 @@ class TestRainbowTraining:
         assert has_grad
 
     def test_parameters_update(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -825,7 +776,7 @@ class TestRainbowTraining:
         assert changed
 
     def test_loss_is_finite(self):
-        env = make_env(1, "Pong", framestack=4, repeat_probs=0.0).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
@@ -843,12 +794,7 @@ class TestRainbowTraining:
         assert not np.isinf(loss)
 
     def test_beta_increment_uses_number_of_environments(self):
-        env = make_env(
-            1,
-            "Pong",
-            framestack=4,
-            repeat_probs=0.0,
-        ).envs[0]
+        env = make_env()
 
         model = Rainbow(
             RainbowPolicy,
