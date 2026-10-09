@@ -1,4 +1,4 @@
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -103,7 +103,7 @@ class SumTree:
         :param values: Cumulative priority values to locate in the tree.
         :return: Leaf indices corresponding to the cumulative priority values.
         """
-        children_indices = (indices * 2 + np.expand_dims([1, 2], axis=1)) # Make matrix of children indices
+        children_indices = indices * 2 + np.expand_dims([1, 2], axis=1)  # Make matrix of children indices
         # If indices correspond to leaf nodes, return them
         if children_indices[0, 0] >= self.sum_tree.shape[0]:
             return indices
@@ -139,23 +139,36 @@ class SumTree:
         return float(self.sum_tree[0])
 
 
-# Extend ReplayBufferSamples with PER-specific fields.
-replay_buffer_samples_fields = list(ReplayBufferSamples.__annotations__.items())
-# Add PER-specific fields only
-replay_buffer_samples_fields.append(("idxs", np.ndarray | None))
-replay_buffer_samples_fields.append(("weights", torch.Tensor | None))
-PERReplayBufferSamples = NamedTuple(
-    "PERReplayBufferSamples",
-    replay_buffer_samples_fields,
-)
-# Preserve the ReplayBufferSamples defaults and add defaults for the
-# Rainbow-specific fields.
-base_defaults = ReplayBufferSamples.__new__.__defaults__ or ()
-PERReplayBufferSamples.__new__.__defaults__ = (
-    *base_defaults,
-    None, # idxs
-    None, # weights
-)
+if TYPE_CHECKING:
+
+    class PERReplayBufferSamples(NamedTuple):
+        observations: torch.Tensor
+        actions: torch.Tensor
+        next_observations: torch.Tensor
+        dones: torch.Tensor
+        rewards: torch.Tensor
+        idxs: np.ndarray
+        weights: torch.Tensor
+        discounts: torch.Tensor
+
+else:
+    # Extend ReplayBufferSamples with PER-specific fields.
+    replay_buffer_samples_fields = list(ReplayBufferSamples.__annotations__.items())
+    # Add PER-specific fields only
+    replay_buffer_samples_fields.append(("idxs", np.ndarray))
+    replay_buffer_samples_fields.append(("weights", torch.Tensor))
+    PERReplayBufferSamples = NamedTuple(
+        "PERReplayBufferSamples",
+        replay_buffer_samples_fields,
+    )
+    # Preserve the ReplayBufferSamples defaults and add defaults for the
+    # Rainbow-specific fields.
+    base_defaults = ReplayBufferSamples.__new__.__defaults__ or ()
+    PERReplayBufferSamples.__new__.__defaults__ = (
+        *base_defaults,
+        None,  # idxs
+        None,  # weights
+    )
 
 
 class PER(ReplayBuffer):
@@ -195,9 +208,7 @@ class PER(ReplayBuffer):
         self.full = False
 
         self.st = SumTree(size)
-        self.data = [None for _ in range(size)]
         self.index = 0
-        self.size = size
 
         # this is the number of frames, not the number of transitions
         # the technical size to ensure there are errors with overwritten memory in theory is very high-
@@ -220,7 +231,7 @@ class PER(ReplayBuffer):
         self.image_width = image_width
         self.image_height = image_height
 
-        self.max_prio = 1
+        self.max_prio = 1.0
 
         self.framestack = framestack
 
@@ -229,14 +240,14 @@ class PER(ReplayBuffer):
         # per-add() annealing step; set by Rainbow._setup_learn once total_timesteps is known
         self.beta_increment = 0.0
         self.eps = 1e-6  # small constant to stop 0 probability
-        self.device = device
+        self.device = torch.device(device)
 
         self.last_terminal = [True for i in range(n_envs)]
         self.tstep_counter = [0 for i in range(n_envs)]
 
         self.n_step = n_step
-        self.state_buffer = [[] for i in range(n_envs)]
-        self.reward_buffer = [[] for i in range(n_envs)]
+        self.state_buffer: list[list[int]] = [[] for _ in range(n_envs)]
+        self.reward_buffer: list[list[int]] = [[] for _ in range(n_envs)]
 
         if rgb:
             self.state_mem = np.zeros((self.storage_size, 3, self.image_width, self.image_height), dtype=np.uint8)
@@ -255,11 +266,15 @@ class PER(ReplayBuffer):
         # everything here is stored as ints as they are just pointers to the actual memory
         # reward contains N values. The first value contains the action. The set of N contains the pointers for both
         # the reward and dones
-        self.trans_dtype = np.dtype([('state', int, self.framestack), ('n_state', int, self.framestack),
-                                     ('reward', int, self.n_step)])
+        self.trans_dtype = np.dtype(
+            [("state", int, self.framestack), ("n_state", int, self.framestack), ("reward", int, self.n_step)]
+        )
 
-        self.blank_trans = (np.zeros(self.framestack, dtype=int), np.zeros(self.framestack, dtype=int),
-                            np.zeros(self.n_step, dtype=int))
+        self.blank_trans = (
+            np.zeros(self.framestack, dtype=int),
+            np.zeros(self.framestack, dtype=int),
+            np.zeros(self.n_step, dtype=int),
+        )
 
         self.pointer_mem = np.array([self.blank_trans] * size, dtype=self.trans_dtype)
 
@@ -273,7 +288,7 @@ class PER(ReplayBuffer):
         reward: np.ndarray,
         done: np.ndarray,
         infos: list[dict[str, Any]],
-        ) -> None:
+    ) -> None:
         """
         Add a batch of transitions to the replay buffer.
 
@@ -307,7 +322,7 @@ class PER(ReplayBuffer):
         done: bool,
         trun: bool,
         stream: int,
-        ) -> None:
+    ) -> None:
         """
         Append a transition to an environment stream.
 
@@ -337,26 +352,29 @@ class PER(ReplayBuffer):
         :param stream: Index of the parallel environment.
         """
         while (
-                len(self.state_buffer[stream]) >= self.framestack + self.n_step
-                and len(self.reward_buffer[stream]) >= self.n_step):
+            len(self.state_buffer[stream]) >= self.framestack + self.n_step and len(self.reward_buffer[stream]) >= self.n_step
+        ):
             # First array in the experience
-            state_array = self.state_buffer[stream][:self.framestack]
+            state_array = self.state_buffer[stream][: self.framestack]
 
             # Second array in the experience (starts after N frames)
-            n_state_array = self.state_buffer[stream][self.n_step:self.n_step + self.framestack]
+            n_state_array = self.state_buffer[stream][self.n_step : self.n_step + self.framestack]
 
             # Reward array (first N rewards)
-            reward_array = self.reward_buffer[stream][:self.n_step]
+            reward_array = self.reward_buffer[stream][: self.n_step]
 
             # Add the experience to the list
-            self.pointer_mem[self.point_mem_idx] = (np.array(state_array, dtype=int), np.array(n_state_array, dtype=int),
-                                                             np.array(reward_array, dtype=int))
+            self.pointer_mem[self.point_mem_idx] = (
+                np.array(state_array, dtype=int),
+                np.array(n_state_array, dtype=int),
+                np.array(reward_array, dtype=int),
+            )
 
             # update the sumtree with the priority
-            self.st.append(self.max_prio ** self.alpha)
+            self.st.append(self.max_prio**self.alpha)
 
-            self.capacity = min(self.size, self.capacity + 1)
-            self.point_mem_idx = (self.point_mem_idx + 1) % self.size
+            self.capacity = min(self.buffer_size, self.capacity + 1)
+            self.point_mem_idx = (self.point_mem_idx + 1) % self.buffer_size
 
             # Remove the first state and reward from the buffers to slide the window
             self.state_buffer[stream].pop(0)
@@ -374,30 +392,33 @@ class PER(ReplayBuffer):
         # Process remaining states and rewards at the end of an episode
         while len(self.state_buffer[stream]) >= self.framestack and len(self.reward_buffer[stream]) > 0:
             # First array in the experience
-            first_array = self.state_buffer[stream][:self.framestack]
+            first_array = self.state_buffer[stream][: self.framestack]
 
             # Second array in the experience (Final `framestack` elements)
-            second_array = self.state_buffer[stream][-self.framestack:]
+            second_array = self.state_buffer[stream][-self.framestack :]
 
             reward_array = self.reward_buffer[stream][:]
             while len(reward_array) < self.n_step:
                 reward_array.append(self.pad_idx)
 
+            self.pointer_mem[self.point_mem_idx] = (
+                np.array(first_array, dtype=int),
+                np.array(second_array, dtype=int),
+                np.array(reward_array, dtype=int),
+            )
 
-            self.pointer_mem[self.point_mem_idx] = (np.array(first_array, dtype=int), np.array(second_array, dtype=int),
-                                                    np.array(reward_array, dtype=int))
+            self.st.append(self.max_prio**self.alpha)
 
-            self.st.append(self.max_prio ** self.alpha)
-
-            self.point_mem_idx = (self.point_mem_idx + 1) % self.size
-            self.capacity = min(self.size, self.capacity + 1)
+            self.point_mem_idx = (self.point_mem_idx + 1) % self.buffer_size
+            self.capacity = min(self.buffer_size, self.capacity + 1)
 
             # Remove the first state and reward from the buffers to slide the window
             self.state_buffer[stream].pop(0)
             if len(self.reward_buffer[stream]) > 0:
                 self.reward_buffer[stream].pop(0)
 
-    def append_memory(self,
+    def append_memory(
+        self,
         state: np.ndarray,
         action: np.ndarray,
         reward: float,
@@ -405,7 +426,7 @@ class PER(ReplayBuffer):
         done: bool,
         trun: bool,
         stream: int,
-        ) -> None:
+    ) -> None:
         """
         Store transition data and frame pointers for an environment stream.
 
@@ -453,11 +474,11 @@ class PER(ReplayBuffer):
             self.reward_buffer[stream].append(self.reward_mem_idx)
             self.reward_mem_idx = (self.reward_mem_idx + 1) % self.storage_size
 
-    def sample(
+    def sample(  # type: ignore[override]
         self,
         batch_size: int,
         env: VecNormalize | None = None,
-        ) -> PERReplayBufferSamples:
+    ) -> PERReplayBufferSamples:
         """
         Sample a batch of transitions using prioritised experience replay.
 
@@ -495,53 +516,90 @@ class PER(ReplayBuffer):
         states = torch.tensor(self.state_mem[state_pointers], dtype=torch.uint8)
         n_states = torch.tensor(self.state_mem[n_state_pointers], dtype=torch.uint8)
 
-        # reward and dones just use the same pointer. actions just use the first one
-        rewards = self.reward_mem[reward_pointers]
-        dones = self.done_mem[reward_pointers]
-        truns = self.trun_mem[reward_pointers]
-        actions = self.action_mem[action_pointers]
+        # Rewards, terminations and actions are retrieved through their pointers.
+        rewards_array = self.reward_mem[reward_pointers]
+        dones_array = self.done_mem[reward_pointers]
+        truns_array = self.trun_mem[reward_pointers]
+        actions_array = self.action_mem[action_pointers]
 
-        # apply n_step cumulation to rewards and dones
+        # Apply n-step accumulation to rewards and terminations.
         if self.n_step > 1:
-            rewards, dones, discounts = self.compute_discounted_rewards_batch(rewards, dones, truns)
+            (
+                rewards_array,
+                dones_array,
+                discounts_array,
+            ) = self.compute_discounted_rewards_batch(
+                rewards_array,
+                dones_array,
+                truns_array,
+            )
         else:
-            rewards = rewards.reshape(-1)
-            dones = dones.reshape(-1)
-            actions = actions.reshape(-1)
-            discounts = np.full(len(rewards), self.gamma)
+            rewards_array = rewards_array.reshape(-1)
+            dones_array = dones_array.reshape(-1)
+            actions_array = actions_array.reshape(-1)
+            discounts_array = np.full(
+                len(rewards_array),
+                self.gamma,
+                dtype=np.float64,
+            )
 
-        # Compute importance-sampling weights w
-        weights = (self.capacity * probs) ** -self.beta
+        # Compute normalised importance-sampling weights.
+        weights_array = (self.capacity * probs) ** -self.beta
+        weights_array = weights_array / weights_array.max()
 
-        weights = torch.tensor(weights / weights.max(), dtype=torch.float32,
-                               device=self.device)  # Normalise by max importance-sampling weight from batch
-
-        # move to pytorch GPU tensors
-        states = states.to(torch.float32).to(self.device)
-        n_states = n_states.to(torch.float32).to(self.device)
-        rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-        dones = torch.tensor(dones, dtype=torch.bool, device=self.device)
-        actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
-        discounts = torch.tensor(discounts, dtype=torch.float32, device=self.device)
-
-        # return batch
-        batch = PERReplayBufferSamples(
-            observations=states,
-            actions=actions,
-            next_observations=n_states,
-            dones=dones,
-            rewards=rewards,
-            idxs=tree_idxs,
-            weights=weights,
-            discounts=discounts,
+        # Convert the sampled data to tensors.
+        states_tensor = states.to(
+            dtype=torch.float32,
+            device=self.device,
+        )
+        next_states_tensor = n_states.to(
+            dtype=torch.float32,
+            device=self.device,
+        )
+        rewards_tensor = torch.as_tensor(
+            rewards_array,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        dones_tensor = torch.as_tensor(
+            dones_array,
+            dtype=torch.bool,
+            device=self.device,
+        )
+        actions_tensor = torch.as_tensor(
+            actions_array,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        weights_tensor = torch.as_tensor(
+            weights_array,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        discounts_tensor = torch.as_tensor(
+            discounts_array,
+            dtype=torch.float32,
+            device=self.device,
         )
 
+        batch = PERReplayBufferSamples(
+            observations=states_tensor,
+            actions=actions_tensor,
+            next_observations=next_states_tensor,
+            dones=dones_tensor,
+            rewards=rewards_tensor,
+            idxs=tree_idxs,
+            weights=weights_tensor,
+            discounts=discounts_tensor,
+        )
         return batch
 
-    def compute_discounted_rewards_batch(self, rewards_batch: np.ndarray,
+    def compute_discounted_rewards_batch(
+        self,
+        rewards_batch: np.ndarray,
         dones_batch: np.ndarray,
         truns_batch: np.ndarray,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Compute n-step discounted returns for a batch of transitions.
 
@@ -552,12 +610,22 @@ class PER(ReplayBuffer):
         discounts for each transition.
         """
         batch_size, n_step = rewards_batch.shape
-        discounted_rewards = np.zeros(batch_size)
-        cumulative_dones = np.zeros(batch_size, dtype=bool)
-        discounts = np.full(batch_size, self.gamma**n_step)
+        discounted_rewards = np.zeros(
+            batch_size,
+            dtype=np.float64,
+        )
+        cumulative_dones = np.zeros(
+            batch_size,
+            dtype=bool,
+        )
+        discounts = np.full(
+            batch_size,
+            self.gamma**n_step,
+            dtype=np.float64,
+        )
 
         for i in range(batch_size):
-            cumulative_discount = 1
+            cumulative_discount = 1.0
             for j in range(n_step):
                 discounted_rewards[i] += cumulative_discount * rewards_batch[i, j]
                 if dones_batch[i, j] == 1:
@@ -572,9 +640,11 @@ class PER(ReplayBuffer):
 
         return discounted_rewards, cumulative_dones, discounts
 
-    def update_priorities(self, idxs: np.ndarray,
+    def update_priorities(
+        self,
+        idxs: np.ndarray,
         priorities: np.ndarray,
-        ) -> None:
+    ) -> None:
         """
         Update the priorities of sampled transitions.
 
@@ -583,4 +653,4 @@ class PER(ReplayBuffer):
         """
         priorities = priorities + self.eps
         self.max_prio = max(self.max_prio, np.max(priorities))
-        self.st.update(idxs, priorities ** self.alpha)
+        self.st.update(idxs, priorities**self.alpha)

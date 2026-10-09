@@ -15,8 +15,11 @@ from torch import Tensor
 from torch.nn import functional
 
 from sb3_contrib.rainbow.buffer import PER, PERReplayBufferSamples
-from sb3_contrib.rainbow.policy import FactorizedNoisyLinear, RainbowPolicy
-
+from sb3_contrib.rainbow.policy import (
+    FactorizedNoisyLinear,
+    NatureC51,
+    RainbowPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +33,15 @@ class Rainbow(OffPolicyAlgorithm):
     prioritized experience replay and multi-step returns.
     """
 
+    policy: RainbowPolicy
+    replay_buffer: PER
+    per_buffer: PER
+    q_net: NatureC51
+    q_net_target: NatureC51
+
     policy_aliases: ClassVar[dict[str, type[BasePolicy]]] = {
         "CnnPolicy": RainbowPolicy,
     }
-
 
     def __init__(
         self,
@@ -151,6 +159,7 @@ class Rainbow(OffPolicyAlgorithm):
         """
         Create the replay buffer, policy networks and optional compiled forwards.
         """
+        assert self.env is not None
         # Create the PER buffer before the base setup to avoid allocating the
         # default SB3 replay buffer.
         self.per_buffer = PER(
@@ -174,8 +183,8 @@ class Rainbow(OffPolicyAlgorithm):
         self.q_net_target = self.policy.q_net_target
 
         if self.compile_mode is not None and self.device.type == "cuda" and platform.system() == "Linux":
-            self.q_net.forward = torch.compile(self.q_net.forward, mode=self.compile_mode)
-            self.q_net_target.forward = torch.compile(self.q_net_target.forward, mode=self.compile_mode)
+            self.q_net.forward = torch.compile(self.q_net.forward, mode=self.compile_mode)  # type: ignore[method-assign]
+            self.q_net_target.forward = torch.compile(self.q_net_target.forward, mode=self.compile_mode)  # type: ignore[method-assign]
         elif self.compile_mode is not None:
             logger.info(f"torch.compile skipped (needs CUDA + Linux; got {self.device.type} + {platform.system()})")
 
@@ -226,13 +235,13 @@ class Rainbow(OffPolicyAlgorithm):
             if isinstance(m, FactorizedNoisyLinear):
                 m.disable_noise()
 
-    def replace_target_network(self)-> None:
+    def replace_target_network(self) -> None:
         """
         Update the target network with the parameters of the online network.
         """
         self.q_net_target.load_state_dict(self.q_net.state_dict())
 
-    def _sample_buffer(self, batch_size: int)-> PERReplayBufferSamples:
+    def _sample_buffer(self, batch_size: int) -> PERReplayBufferSamples:
         """
         Sample a minibatch from the prioritised experience replay buffer.
 
@@ -242,7 +251,7 @@ class Rainbow(OffPolicyAlgorithm):
         """
         return self.replay_buffer.sample(batch_size)
 
-    def _train_call(self, batch_size: int)-> None:
+    def _train_call(self, batch_size: int) -> None:
         """
         Perform a single Rainbow DQN gradient update.
 
@@ -349,7 +358,7 @@ def distr_projection(
     v_max: float,
     n_atoms: int,
     gamma: float | Tensor,
-    ) -> Tensor:
+) -> Tensor:
     """
     Project the target distribution onto the categorical support.
 
