@@ -1,27 +1,26 @@
 import math
 from math import sqrt
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from gymnasium import spaces
+from stable_baselines3.common.policies import BasePolicy
+from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from torch import Tensor, nn, optim
 from torch.nn import init as torch_init
-from typing import Any
-
-from gymnasium import spaces
-from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
-
-
-from stable_baselines3.common.policies import BasePolicy
 
 
 class RainbowPolicy(BasePolicy):
-    def __init__(self, observation_space: spaces.Space,
+    def __init__(
+        self,
+        observation_space: spaces.Box,
         action_space: spaces.Discrete,
         lr_schedule: Schedule,
         linear_size: int = 512,
         **kwargs: Any,
-        ) -> None:
+    ) -> None:
         """
         Initialise the Rainbow policy.
 
@@ -33,8 +32,14 @@ class RainbowPolicy(BasePolicy):
         """
         super().__init__(observation_space, action_space)
 
+        if observation_space.shape is None:
+            raise ValueError("Rainbow requires an observation space with a defined shape.")
+
+        if len(observation_space.shape) != 3:
+            raise ValueError("Rainbow requires three-dimensional image observations.")
+
         obs_shape = observation_space.shape
-        n_actions = action_space.n
+        n_actions = int(action_space.n)
 
         self.linear_size = linear_size
 
@@ -68,10 +73,10 @@ class RainbowPolicy(BasePolicy):
         return self.q_net.qvals(obs)
 
     def _predict(
-            self,
-            observation: PyTorchObs,
-            deterministic: bool = False,
-        ) -> Tensor:
+        self,
+        observation: PyTorchObs,
+        deterministic: bool = False,
+    ) -> Tensor:
         """
         Predict actions for the given observations.
 
@@ -79,6 +84,8 @@ class RainbowPolicy(BasePolicy):
         :param deterministic: Whether to disable NoisyNet noise for prediction.
         :return: Greedy action for each observation.
         """
+        if not isinstance(observation, Tensor):
+            raise TypeError("Rainbow only supports tensor observations.")
         if deterministic:
             self.disable_noise()
         else:
@@ -96,7 +103,7 @@ class RainbowPolicy(BasePolicy):
                 module.disable_noise()
 
     @torch.no_grad()
-    def reset_noise(self)-> None:
+    def reset_noise(self) -> None:
         """
         Resample the noise in all noisy linear layers of the online network.
         """
@@ -116,7 +123,7 @@ class FactorizedNoisyLinear(nn.Module):
         out_features: int,
         sigma_0: float = 0.5,
         self_norm: bool = False,
-        ) -> None:
+    ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -125,12 +132,14 @@ class FactorizedNoisyLinear(nn.Module):
         # weight: w = \mu^w + \sigma^w . \epsilon^w
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
         self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
-        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
+        self.weight_epsilon: Tensor
+        self.register_buffer("weight_epsilon", torch.empty(out_features, in_features))
 
         # bias: b = \mu^b + \sigma^b . \epsilon^b
         self.bias_mu = nn.Parameter(torch.empty(out_features))
         self.bias_sigma = nn.Parameter(torch.empty(out_features))
-        self.register_buffer('bias_epsilon', torch.empty(out_features))
+        self.bias_epsilon: Tensor
+        self.register_buffer("bias_epsilon", torch.empty(out_features))
 
         if self_norm:
             self.reset_parameters_self_norm()
@@ -207,9 +216,10 @@ class FactorizedNoisyLinear(nn.Module):
         :param input: Input tensor.
         :return: Output tensor after applying the noisy weights and biases.
         """
-        return F.linear(input,
-                        self.weight_mu + self.weight_sigma*self.weight_epsilon,
-                        self.bias_mu + self.bias_sigma*self.bias_epsilon)
+        return F.linear(
+            input, self.weight_mu + self.weight_sigma * self.weight_epsilon, self.bias_mu + self.bias_sigma * self.bias_epsilon
+        )
+
 
 class NatureC51(nn.Module):
     """
@@ -267,7 +277,8 @@ class NatureC51(nn.Module):
         self.fcV2 = FactorizedNoisyLinear(self.linear_size, self.atoms)
         self.fcA2 = FactorizedNoisyLinear(self.linear_size, actions * self.atoms)
 
-        self.register_buffer("supports", torch.arange(v_min, v_max+delta_z, delta_z))
+        self.supports: Tensor
+        self.register_buffer("supports", torch.arange(v_min, v_max + delta_z, delta_z))
         self.softmax = nn.Softmax(dim=1)
 
         self.to(device)

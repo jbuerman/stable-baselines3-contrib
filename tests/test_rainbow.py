@@ -1,18 +1,17 @@
-from stable_baselines3.common.envs import FakeImageEnv
 import numpy as np
 import pytest
 import torch
 from gymnasium import spaces
+from stable_baselines3.common.envs import FakeImageEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from sb3_contrib.rainbow.rainbow import Rainbow, distr_projection
 from sb3_contrib.rainbow.buffer import PER, SumTree
 from sb3_contrib.rainbow.policy import (
     FactorizedNoisyLinear,
     NatureC51,
     RainbowPolicy,
 )
-
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from sb3_contrib.rainbow.rainbow import Rainbow, distr_projection
 
 
 def make_env(
@@ -136,12 +135,10 @@ class TestNStepReturns:
         dones = np.array([[False, False, False]])
         truncs = np.array([[False, False, False]])
 
-        returns, cumulative_dones, discounts = (
-            buffer.compute_discounted_rewards_batch(
-                rewards,
-                dones,
-                truncs,
-            )
+        returns, cumulative_dones, discounts = buffer.compute_discounted_rewards_batch(
+            rewards,
+            dones,
+            truncs,
         )
 
         expected_return = 1.0 + 0.9 * 2.0 + 0.9**2 * 3.0
@@ -163,12 +160,10 @@ class TestNStepReturns:
         dones = np.array([[False, True, False]])
         truncs = np.array([[False, False, False]])
 
-        returns, cumulative_dones, _ = (
-            buffer.compute_discounted_rewards_batch(
-                rewards,
-                dones,
-                truncs,
-            )
+        returns, cumulative_dones, _ = buffer.compute_discounted_rewards_batch(
+            rewards,
+            dones,
+            truncs,
         )
 
         expected_return = 1.0 + 0.9 * 2.0
@@ -189,12 +184,10 @@ class TestNStepReturns:
         dones = np.array([[False, False, False]])
         truncs = np.array([[False, True, False]])
 
-        returns, cumulative_dones, discounts = (
-            buffer.compute_discounted_rewards_batch(
-                rewards,
-                dones,
-                truncs,
-            )
+        returns, cumulative_dones, discounts = buffer.compute_discounted_rewards_batch(
+            rewards,
+            dones,
+            truncs,
         )
 
         expected_return = 1.0 + 0.9 * 2.0
@@ -421,11 +414,7 @@ class TestRainbowPolicy:
             deterministic=False,
         )
 
-        noisy_layers = [
-            module
-            for module in policy.q_net.modules()
-            if isinstance(module, FactorizedNoisyLinear)
-        ]
+        noisy_layers = [module for module in policy.q_net.modules() if isinstance(module, FactorizedNoisyLinear)]
 
         assert noisy_layers
 
@@ -635,6 +624,7 @@ class TestRainbowBufferInterface:
         assert batch.observations.device.type == model.device.type
         assert batch.next_observations.device.type == model.device.type
         assert batch.weights.device.type == model.device.type
+
 
 class TestRainbowBufferPER:
 
